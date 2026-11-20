@@ -1,0 +1,36 @@
+<RCC>
+  <qresource prefix="/theme">
+    <file alias="tokens.dark.json">theme/tokens.dark.json</file>
+    <file alias="tokens.light.json">theme/tokens.light.json</file>
+    <file alias="app.qss.template">theme/app.qss.template</file>
+  </qresource>
+  <qresource prefix="/icons">
+    <file alias="play.svg">icons/play.svg</file>
+    <file alias="stop.svg">icons/stop.svg</file>
+    <file alias="loop.svg">icons/loop.svg</file>
+    <file alias="tostart.svg">icons/tostart.svg</file>
+    <file alias="sun.svg">icons/sun.svg</file>
+    <file alias="moon.svg">icons/moon.svg</file>
+    <file alias="undo.svg">icons/undo.svg</file>
+    <file alias="redo.svg">icons/redo.svg</file>
+    <file alias="cursor.svg">icons/cursor.svg</file>
+    <file alias="razor.svg">icons/razor.svg</file>
+    <file alias="fade.svg">icons/fade.svg</file>
+    <file alias="automation.svg">icons/automation.svg</file>
+    <file alias="magnet.svg">icons/magnet.svg</file>
+    <file alias="plus.svg">icons/plus.svg</file>
+    <file alias="minus.svg">icons/minus.svg</file>
+    <file alias="import.svg">icons/import.svg</file>
+    <file alias="folder.svg">icons/folder.svg</file>
+    <file alias="history.svg">icons/history.svg</file>
+    <file alias="sparkles.svg">icons/sparkles.svg</file>
+    <file alias="cube.svg">icons/cube.svg</file>
+    <file alias="close.svg">icons/close.svg</file>
+    <file alias="sliders.svg">icons/sliders.svg</file>
+    <file alias="wave.svg">icons/wave.svg</file>
+    <file alias="cpu.svg">icons/cpu.svg</file>
+    <file alias="info.svg">icons/info.svg</file>
+    <file alias="more.svg">icons/more.svg</file>
+    <file alias="fit.svg">icons/fit.svg</file>
+  </qresource>
+</RCC>
