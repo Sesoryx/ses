@@ -1,12 +1,19 @@
 #pragma once
 // ses::engine — audio engine facade (DESIGN.md §3/§4). NO Qt dependency.
-// UI-first slice: only the interface + a NullEngine exist. The real miniaudio
-// device, RenderPlan slot, SPSC rings and block mixer land in P1. The UI binds
-// to this interface and runs an explicitly-labelled preview transport meanwhile.
+//
+// The Engine interface is what the UI binds to. NullEngine is the honest
+// placeholder (no audio, never pretends); DeviceEngine (P1 task 3) is the
+// real miniaudio-backed facade: transport commands cross a lock-free ring and
+// are applied on the audio thread at block boundaries (ROADMAP §2.3).
+
+#include "engine/io/DeviceTypes.h"
 
 #include <cstdint>
+#include <memory>
 
 namespace ses::engine {
+
+class AudioDevice; // pimpl; defined in engine/io/AudioDevice.h
 
 struct TransportState {
     bool playing = false;
@@ -42,6 +49,53 @@ public:
     void setLoop(bool, int64_t, int64_t) override {}
     void setAbFader(double) override {}
     TransportState state() const override { return {}; }
+};
+
+// Real device-backed engine (ROADMAP P1 task 3). Owns the AudioDevice and
+// turns the Engine transport API into RT commands applied at block boundaries.
+// The playhead is the RT playhead in project-rate samples; loop wrap happens
+// in the audio callback. Upstream of the device the engine is silent until
+// clips are fed to mixer() — that wiring arrives with the render plan (P2).
+class DeviceEngine final : public Engine {
+public:
+    DeviceEngine();
+    ~DeviceEngine() override; // out-of-line: AudioDevice is a pimpl
+    DeviceEngine(const DeviceEngine&) = delete;
+    DeviceEngine& operator=(const DeviceEngine&) = delete;
+
+    // Default output device at the project rate. On failure available() stays
+    // false and the caller honestly falls back to preview mode.
+    bool open(int sampleRate = 48000, unsigned periodFrames = 256);
+
+    // Headless tests (ROADMAP §2.5): the callback runs silently at the
+    // requested rate/period, no audio hardware involved.
+    bool openOnNullBackend(int sampleRate = 48000, unsigned periodFrames = 256);
+
+    // Starts the device pump (it outputs silence until play()). play() also
+    // starts it lazily, so an idle app holds no running device.
+    bool start();
+    void close();
+
+    bool available() const override; // true while a device is open
+
+    void play() override;
+    void stop() override;
+    void seek(int64_t sample) override;
+    void setLoop(bool on, int64_t start, int64_t end) override;
+    void setAbFader(double x) override; // RT parameter command, smoothed (P4)
+    TransportState state() const override;
+
+    // GUI-thread drains for events and meters (wired to the UI in P1 task 4).
+    bool nextTelemetry(Telemetry& out);
+    bool nextDeviceEvent(DeviceEvent& out);
+
+    int actualSampleRate() const; // 0 when no device is open
+
+private:
+    std::unique_ptr<AudioDevice> device_;
+    bool loop_ = false;
+    int64_t loopStart_ = 0;
+    int64_t loopEnd_ = 0;
 };
 
 } // namespace ses::engine

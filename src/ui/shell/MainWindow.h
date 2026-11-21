@@ -74,7 +74,7 @@ private:
 
     core::Settings settings_;
     core::ProjectModel model_;
-    engine::NullEngine nullEngine_;
+    engine::DeviceEngine engine_;
     Transport* transport_ = nullptr;
 
     TimelineWidget* timeline_ = nullptr;

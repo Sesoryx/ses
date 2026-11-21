@@ -6,6 +6,7 @@
 
 #include "engine/BlockMixer.h"
 #include "engine/SpscRing.h"
+#include "engine/io/DeviceTypes.h"
 
 #include <miniaudio.h>
 
@@ -14,27 +15,7 @@
 
 namespace ses::engine {
 
-// POD telemetry: audio thread → GUI (drained by a 30 Hz QTimer). A full ring
-// drops pushes; never blocks.
-struct Telemetry {
-    int64_t playhead;
-    float masterPeak;
-    uint32_t xruns;
-    uint32_t underruns;
-};
-
-// POD device event: miniaudio notification thread → GUI.
-struct DeviceEvent {
-    enum Kind : uint8_t { Started, Stopped, Rerouted, InterruptionBegan, InterruptionEnded } kind;
-};
-
-// GUI → RT commands (play/stop/seek/loop/abFader), applied at block boundaries.
-struct RtCommand {
-    enum Kind : uint8_t { Play, Stop, Seek, SetLoop, SetAbFader } kind;
-    int64_t a = 0, b = 0;
-    float x = 0.0f;
-};
-
+// Telemetry / DeviceEvent / RtCommand: see engine/io/DeviceTypes.h.
 class AudioDevice {
 public:
     ~AudioDevice() { close(); }
@@ -51,6 +32,9 @@ public:
     void stop();
     int actualSampleRate() const; // device_.sampleRate after init (may differ from the request)
     bool playing() const { return playing_.load(std::memory_order_relaxed); }
+    bool started() const { return initialized_ && ma_device_is_started(&device_); }
+    bool isOpen() const { return initialized_; }
+    int64_t playhead() const { return playhead_.load(std::memory_order_relaxed); }
 
     // GUI-thread drains:
     bool nextTelemetry(Telemetry& out) { return telemetry_.pop(out); }

@@ -1,4 +1,38 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#059669"/>
-  <text x="32" y="32" dy="0.35em" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif" font-size="32" font-weight="600" fill="#ffffff">E</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="100%" height="100%">
+  <defs>
+    <!-- Original Warm Cream Background Gradient -->
+    <radialGradient id="bgGradient" cx="50%" cy="50%" r="65%" fx="50%" fy="50%">
+      <stop offset="0%" stop-color="#FFFDF5" />
+      <stop offset="100%" stop-color="#F8EBD0" />
+    </radialGradient>
+  </defs>
+
+  <!-- Background Squircle -->
+  <rect width="1024" height="1024" rx="224" ry="224" fill="url(#bgGradient)" />
+
+  <!-- Soundwave Echoes (Radiating Outward) -->
+  <g fill="none" stroke="#7326D3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Outer Top Echo -->
+    <path d="M 430 230 Q 512 150 594 230" stroke-width="24" opacity="0.25" />
+    <!-- Outer Bottom Echo -->
+    <path d="M 410 794 Q 512 874 614 794" stroke-width="24" opacity="0.25" />
+    
+    <!-- Inner Top Echo -->
+    <path d="M 380 310 Q 512 200 644 310" stroke-width="40" opacity="0.5" />
+    <!-- Inner Bottom Echo -->
+    <path d="M 360 714 Q 512 824 664 714" stroke-width="40" opacity="0.5" />
+  </g>
+
+  <!-- Core Central Graphic (Scaled Up) -->
+  <g fill="none" stroke="#7326D3" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Main Top Arch -->
+    <path d="M 320 410 Q 512 260 704 410" stroke-width="64" />
+    
+    <!-- Main Bottom Arch -->
+    <path d="M 300 614 Q 512 764 724 614" stroke-width="64" />
+  </g>
+
+  <!-- Main Middle Lens (The "Pupil" / Center Frequency) -->
+  <path d="M 310 512 Q 512 390 714 512 Q 512 634 310 512 Z" fill="#7326D3" />
+  
 </svg>

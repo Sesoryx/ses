@@ -82,7 +82,10 @@ MainWindow::MainWindow(QWidget* parent)
     settings_ = core::Settings::load();
     ThemeManager::instance()->setMode(ThemeManager::modeFromString(settings_.theme));
 
-    transport_ = new Transport(&model_, &nullEngine_, this);
+    // Real RT engine (P1 task 3): the default output device at the project
+    // rate. If no device opens, Transport honestly stays in preview mode.
+    engine_.open(model_.project().sampleRate);
+    transport_ = new Transport(&model_, &engine_, this);
     toast_ = new Toast(this);
 
     auto* central = new QWidget(this);
@@ -155,7 +158,7 @@ void MainWindow::buildTransportBar(QWidget* central)
     engineBadge_->setText(transport_->previewMode()
                               ? QStringLiteral("Preview · no audio")
                               : QStringLiteral("CPU · engine"));
-    engineBadge_->setToolTip(QStringLiteral("Audio engine (miniaudio + RT mixer) lands in P1. The playhead animates in preview mode — no audio yet."));
+    engineBadge_->setToolTip(QStringLiteral("Audio engine: miniaudio device + RT mixer (P1). Without an output device the transport runs in labelled preview mode — no audio."));
 
     hl->addWidget(playBtn_);
     hl->addWidget(stopBtn);
@@ -406,8 +409,8 @@ void MainWindow::buildActions()
         QMessageBox::about(this, QStringLiteral("ses"),
                            QStringLiteral("<b>ses 0.1.0</b> — local-first audio workstation.<br><br>"
                                           "UI-first slice: editing shell, theme system, undo history.<br>"
-                                          "Audio engine (P1) and inference (P5) are not connected yet — "
-                                          "the transport runs in labelled preview mode.<br><br>"
+                                          "Audio engine: miniaudio device + RT mixer (P1). Inference (P5) "
+                                          "is not connected yet.<br><br>"
                                           "No cloud. No telemetry. Your audio stays on this machine."));
     });
 

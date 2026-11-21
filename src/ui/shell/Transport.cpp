@@ -28,8 +28,11 @@ void Transport::play()
     if (!previewMode()) {
         engine_->play();
     }
-    if (playhead_ >= model_->project().duration())
+    if (playhead_ >= model_->project().duration()) {
         playhead_ = loop_ ? loopStart_ : 0;
+        if (!previewMode())
+            engine_->seek(playhead_); // keep the RT playhead in sync with the UI
+    }
     setPlaying(true);
     timer_.start();
 }

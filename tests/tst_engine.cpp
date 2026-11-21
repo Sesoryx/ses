@@ -1,3 +1,4 @@
+#include "engine/Engine.h"
 #include "engine/io/AudioDevice.h"
 #include "engine/BlockMixer.h"
 #include "engine/SpscRing.h"
@@ -29,6 +30,23 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
         return t;
+    }
+
+    // Same idea for the Engine facade: polls state() until pred() matches or
+    // the deadline passes.
+    static TransportState waitForState(DeviceEngine& engine, int sleepMs,
+                                        const std::function<bool(const TransportState&)>& pred)
+    {
+        TransportState st;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            st = engine.state();
+            if (pred(st))
+                return st;
+            if (sleepMs > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+        }
+        return st;
     }
 
 private slots:
@@ -155,6 +173,109 @@ private slots:
         QVERIFY(t.masterPeak <= 1.0f);
         dev.stop();
         dev.close();
+    }
+
+    void deviceEngineFacadeIsInertWhenUnavailable()
+    {
+        // No device open → every call is an honest no-op and state() stays at
+        // the transport origin (the UI falls back to preview mode).
+        DeviceEngine engine;
+        QVERIFY(!engine.available());
+        QCOMPARE(engine.actualSampleRate(), 0);
+        engine.play();
+        engine.stop();
+        engine.seek(1000);
+        engine.setLoop(true, 0, 100);
+        engine.setAbFader(0.25);
+        const TransportState st = engine.state();
+        QVERIFY(!st.playing);
+        QVERIFY(!st.loop);
+        QCOMPARE(st.playhead, int64_t(0));
+        Telemetry t{};
+        QVERIFY(!engine.nextTelemetry(t));
+        DeviceEvent e{};
+        QVERIFY(!engine.nextDeviceEvent(e));
+        engine.close(); // no-op
+        QVERIFY(!engine.available());
+    }
+
+    void deviceEngineFacadeTransportOnNullBackend()
+    {
+        DeviceEngine engine;
+        QVERIFY(engine.openOnNullBackend(48000, 256));
+        QVERIFY(engine.available());
+        QCOMPARE(engine.actualSampleRate(), 48000);
+
+        TransportState st = engine.state();
+        QVERIFY(!st.playing);
+        QCOMPARE(st.playhead, int64_t(0));
+        QCOMPARE(st.loopStart, int64_t(0));
+        QCOMPARE(st.loopEnd, int64_t(0));
+
+        // play() lazily starts the device pump (an idle app holds no running
+        // device) and the Play command lands at the next block boundary.
+        engine.play();
+        st = waitForState(engine, 1, [](const TransportState& s) {
+            return s.playing && s.playhead >= 256;
+        });
+        QVERIFY(st.playing);
+        QVERIFY(st.playhead >= 256);
+        QVERIFY(engine.start()); // explicit start is idempotent
+
+        DeviceEvent event{};
+        QVERIFY(engine.nextDeviceEvent(event)); // the pump announced itself
+        QCOMPARE(int(event.kind), int(DeviceEvent::Started));
+
+        // Stop parks the playhead — then the Seek is sample-exact and stable.
+        engine.stop();
+        st = waitForState(engine, 1, [](const TransportState& s) { return !s.playing; });
+        QVERIFY(!st.playing);
+        engine.seek(1000);
+        st = waitForState(engine, 1, [](const TransportState& s) { return s.playhead == 1000; });
+        QCOMPARE(st.playhead, int64_t(1000));
+        QVERIFY(!st.playing);
+
+        // Loop [1000, 1400) wraps at block boundaries: the head cycles
+        // 1000 → 1256 → 1000 … and never leaves the region.
+        engine.setLoop(true, 1000, 1400);
+        st = engine.state();
+        QVERIFY(st.loop);
+        QCOMPARE(st.loopStart, int64_t(1000));
+        QCOMPARE(st.loopEnd, int64_t(1400));
+        engine.play();
+        st = waitForState(engine, 1, [](const TransportState& s) {
+            return s.playhead >= 1000 && s.playhead < 1400 && s.playhead != 1000;
+        });
+        QCOMPARE(st.playhead, int64_t(1256)); // inside the loop region, past the start
+        st = waitForState(engine, 1, [](const TransportState& s) { return s.playhead == 1000; });
+        QCOMPARE(st.playhead, int64_t(1000)); // wrapped back — not 1512
+
+        // Telemetry flows through the facade while the pump runs (the ring
+        // keeps the freshest head: 1000 or 1256 inside the loop region).
+        Telemetry t{};
+        bool gotTelemetry = false;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            while (engine.nextTelemetry(t))
+                gotTelemetry = true;
+            if (gotTelemetry)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        QVERIFY(gotTelemetry);
+        QVERIFY(t.playhead >= 1000 && t.playhead < 1400);
+
+        // Loop off → the playhead escapes the region again.
+        engine.setLoop(false, 1000, 1400);
+        QVERIFY(!engine.state().loop);
+        st = waitForState(engine, 1, [](const TransportState& s) { return s.playhead >= 1400; });
+        QVERIFY(st.playhead >= 1400);
+
+        engine.stop();
+        st = waitForState(engine, 1, [](const TransportState& s) { return !s.playing; });
+        QVERIFY(!st.playing);
+        engine.close();
+        QVERIFY(!engine.available());
     }
 
     void blockMixerHandlesExtremeTimelineAndNonFiniteValues()
