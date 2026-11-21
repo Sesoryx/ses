@@ -36,11 +36,28 @@ add_library(ses_core STATIC
 target_include_directories(ses_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(ses_core PUBLIC Qt6::Core Qt6::Widgets)
 
-# ---- engine: RT audio facade (NO Qt). Real miniaudio impl lands in P1. ------
+# ---- miniaudio: single header, single implementation TU (ROADMAP §2.2) -------
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/miniaudio/miniaudio.h")
+  message(FATAL_ERROR
+    "external/miniaudio/miniaudio.h is missing — vendor it first:\n"
+    "  curl -fsSL -o external/miniaudio/miniaudio.h \"\n"
+    "    https://raw.githubusercontent.com/mackron/miniaudio/0.11.25/miniaudio.h\"\n"
+    "  then record its sha256 in external/miniaudio/CHECKSUMS (docs/ROADMAP.md §2.2)")
+endif()
+add_library(miniaudio INTERFACE)
+target_include_directories(miniaudio INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/miniaudio)
+
+# ---- engine: RT audio facade (NO Qt). Real device + decode pool live here. ---
 add_library(ses_engine STATIC
   src/engine/Engine.cpp
+  src/engine/io/miniaudio_impl.cpp
+  src/engine/io/AudioDevice.cpp
 )
 target_include_directories(ses_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# Keep the 95k-line header out of unity batches (ROADMAP §2.2).
+set_source_files_properties(src/engine/io/miniaudio_impl.cpp
+  PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+target_link_libraries(ses_engine PUBLIC miniaudio)
 
 # ---- inference: catalog data only for now; audio.cpp ABI lands in P5. -------
 add_library(ses_inference STATIC

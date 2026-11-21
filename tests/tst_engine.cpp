@@ -1,14 +1,36 @@
+#include "engine/io/AudioDevice.h"
 #include "engine/BlockMixer.h"
 #include "engine/SpscRing.h"
 
 #include <QtTest>
 
+#include <chrono>
+#include <functional>
 #include <limits>
+#include <thread>
 
 using namespace ses::engine;
 
 class TestEngineCore : public QObject {
     Q_OBJECT
+private:
+    // Drains telemetry until pred() sees a matching sample or the deadline
+    // passes. Returns the last telemetry observed (or the initial value).
+    static Telemetry waitFor(AudioDevice& dev, Telemetry start,
+                             const std::function<bool(const Telemetry&)>& pred)
+    {
+        Telemetry t = start;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            while (dev.nextTelemetry(t)) {
+                if (pred(t))
+                    return t;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return t;
+    }
+
 private slots:
     void spscBoundsAndOrder()
     {
@@ -63,6 +85,76 @@ private slots:
         QVERIFY(!mixer.setClip(0, { &sample,
                                     std::numeric_limits<std::size_t>::max() / 2 + 1,
                                     0, 1.0f, 0.0f, false }));
+    }
+
+    void audioDeviceNullBackendOpenStartStop()
+    {
+        AudioDevice dev;
+        QVERIFY(dev.openOnBackend(ma_backend_null, 48000, 256));
+        QCOMPARE(dev.actualSampleRate(), 48000);
+        QVERIFY(dev.start());
+        DeviceEvent event{};
+        QVERIFY(dev.nextDeviceEvent(event));
+        QCOMPARE(int(event.kind), int(DeviceEvent::Started));
+        dev.stop();
+        DeviceEvent stopped{};
+        QVERIFY(dev.nextDeviceEvent(stopped));
+        QCOMPARE(int(stopped.kind), int(DeviceEvent::Stopped));
+        QVERIFY(!dev.playing());
+        dev.close();
+        QVERIFY(!dev.start()); // closed device refuses to start
+    }
+
+    void audioDeviceTransportCommandsOnNullBackend()
+    {
+        AudioDevice dev;
+        QVERIFY(dev.openOnBackend(ma_backend_null, 48000, 256));
+        QVERIFY(dev.start());
+
+        // Silence while stopped: playhead never leaves zero.
+        Telemetry t{};
+        t = waitFor(dev, t, [](const Telemetry& x) { return x.playhead == 0; });
+        QVERIFY(dev.sendCommand({RtCommand::Stop}));
+
+        // Play → playhead advances past one period.
+        QVERIFY(dev.sendCommand({RtCommand::Play}));
+        t = waitFor(dev, t, [](const Telemetry& x) { return x.playhead >= 256; });
+
+        // Seek to 1000 → the next block reports exactly that head.
+        QVERIFY(dev.sendCommand({RtCommand::Seek, 1000, 0, 0.0f}));
+        t = waitFor(dev, t, [](const Telemetry& x) { return x.playhead == 1000; });
+
+        // Loop [1000, 1128) wraps: the head stays inside the loop region.
+        QVERIFY(dev.sendCommand({RtCommand::SetLoop, 1000, 1128, 1.0f}));
+        t = waitFor(dev, t, [](const Telemetry& x) {
+            return x.playhead >= 1000 && x.playhead < 1128 && x.playhead != 1000;
+        });
+        QVERIFY(t.playhead < 1128);
+
+        QVERIFY(dev.sendCommand({RtCommand::Stop}));
+        dev.stop();
+        dev.close();
+    }
+
+    void audioDeviceMixerRendersThroughCallback()
+    {
+        // One clip through the off-RT mixer handle; the callback's master peak
+        // must reflect the mixed samples while playing.
+        static const float source[] = { 0.5f, 0.5f, 0.5f, 0.5f };
+        AudioDevice dev;
+        QVERIFY(dev.openOnBackend(ma_backend_null, 48000, 256));
+        BlockMixer::ClipView clip;
+        clip.samples = source;
+        clip.frames = 2;
+        clip.timelineStart = 0;
+        QVERIFY(dev.mixer().setClip(0, clip));
+        QVERIFY(dev.start());
+        QVERIFY(dev.sendCommand({RtCommand::Play}));
+        Telemetry t{};
+        t = waitFor(dev, t, [](const Telemetry& x) { return x.masterPeak > 0.4f; });
+        QVERIFY(t.masterPeak <= 1.0f);
+        dev.stop();
+        dev.close();
     }
 
     void blockMixerHandlesExtremeTimelineAndNonFiniteValues()
