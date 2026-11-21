@@ -114,7 +114,7 @@ void MainWindow::buildTransportBar(QWidget* central)
 {
     auto* bar = new QFrame(central);
     bar->setObjectName(QStringLiteral("TransportBar"));
-    bar->setFixedHeight(54);
+    bar->setFixedHeight(56);
     auto* hl = new QHBoxLayout(bar);
     hl->setContentsMargins(10, 6, 10, 6);
     hl->setSpacing(6);
@@ -153,7 +153,7 @@ void MainWindow::buildTransportBar(QWidget* central)
     engineBadge_ = new QLabel(bar);
     engineBadge_->setObjectName(QStringLiteral("Badge"));
     engineBadge_->setText(transport_->previewMode()
-                              ? QStringLiteral("CPU · preview transport")
+                              ? QStringLiteral("Preview · no audio")
                               : QStringLiteral("CPU · engine"));
     engineBadge_->setToolTip(QStringLiteral("Audio engine (miniaudio + RT mixer) lands in P1. The playhead animates in preview mode — no audio yet."));
 
@@ -292,7 +292,7 @@ void MainWindow::buildEditor(QWidget* central)
     editorSplit_->addWidget(editorTop);
     editorSplit_->addWidget(mixer_);
     editorSplit_->setStretchFactor(0, 1);
-    editorSplit_->setSizes({ 560, 210 });
+    editorSplit_->setSizes({ 700, 190 });
 
     mainSplit_->addWidget(editorSplit_);
     static_cast<QVBoxLayout*>(central->layout())->addWidget(mainSplit_, 1);
@@ -307,7 +307,7 @@ void MainWindow::buildDock()
     dock_->addTab(ai_, sesIcon(QStringLiteral("sparkles")), QStringLiteral("AI"));
     dock_->addTab(history_, sesIcon(QStringLiteral("history")), QStringLiteral("History"));
     dock_->addTab(models_, sesIcon(QStringLiteral("cube")), QStringLiteral("Models"));
-    dock_->setMinimumWidth(280);
+    dock_->setMinimumWidth(300);
     dock_->setVisible(settings_.dockVisible);
     mainSplit_->addWidget(dock_);
     mainSplit_->setStretchFactor(0, 1);
@@ -321,9 +321,6 @@ void MainWindow::buildStatusBar()
     offline->setProperty("status", QStringLiteral("ok"));
     offline->setToolTip(QStringLiteral("No telemetry, no cloud. The only network path is an explicit model download (P5)."));
     statusBar()->addWidget(offline);
-    auto* engineStatus = new QLabel(QStringLiteral("Preview transport — audio engine pending (P1)"), this);
-    engineStatus->setToolTip(QStringLiteral("No audio output yet: the playhead animates in preview mode until the miniaudio engine lands."));
-    statusBar()->addWidget(engineStatus);
     auto* sr = new QLabel(QStringLiteral("%1 kHz").arg(model_.project().sampleRate / 1000.0), this);
     sr->setToolTip(QStringLiteral("Project sample rate (fixed 48 kHz in v1)"));
     statusBar()->addPermanentWidget(sr);
@@ -577,6 +574,12 @@ QString MainWindow::timeString(int64_t samples) const
     const int64_t m = (ms / 60000) % 60;
     const int64_t s = (ms / 1000) % 60;
     const int64_t mm = ms % 1000;
+    if (h == 0) {
+        return QStringLiteral("%1:%2.%3")
+            .arg(ms / 60000, 2, 10, QLatin1Char('0'))
+            .arg(s, 2, 10, QLatin1Char('0'))
+            .arg(mm, 3, 10, QLatin1Char('0'));
+    }
     return QStringLiteral("%1:%2:%3.%4")
         .arg(h, 2, 10, QLatin1Char('0'))
         .arg(m, 2, 10, QLatin1Char('0'))

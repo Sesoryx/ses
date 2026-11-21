@@ -44,7 +44,7 @@ QSvgRenderer* rendererFor(const QString& name)
 
 QImage renderTinted(const QString& name, const QSize& size, qreal dpr, const QColor& tint)
 {
-    QImage img(size * dpr, QImage::Format_ARGB32_Premultiplied);
+    QImage img(size * dpr, QImage::Format_ARGB32);
     img.setDevicePixelRatio(dpr);
     img.fill(Qt::transparent);
     QSvgRenderer* renderer = rendererFor(name);

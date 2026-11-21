@@ -6,6 +6,10 @@ QWidget {
   font-size: @fontBase;
 }
 QMainWindow, QDialog { background: @bg; }
+QMenuBar { background: @panel; color: @text; border-bottom: 1px solid @border; }
+QMenuBar::item { background: transparent; color: @text; padding: 5px 8px; }
+QMenuBar::item:selected { background: @bgAlt; }
+QMenuBar::item:pressed { background: @panelAlt; }
 QWidget:focus { outline: none; }
 
 QToolTip {
@@ -73,6 +77,10 @@ QToolButton[variant="transport"] { padding: 7px; border-radius: 16px; }
 QToolButton[variant="transport"]:checked { background: @accent; color: @accentText; border-color: @accent; }
 QToolButton[variant="chip"] {
   padding: 2px 8px; font-size: @fontSmall; font-weight: 600;
+  border: 1px solid @border; border-radius: 9px; background: @bgAlt; color: @textSecondary;
+}
+QToolButton[variant="mode"] {
+  padding: 2px 4px; font-size: 9px; font-weight: 600;
   border: 1px solid @border; border-radius: 9px; background: @bgAlt; color: @textSecondary;
 }
 QToolButton[variant="chip"][route="A"] { color: @accent; border-color: @accent; }

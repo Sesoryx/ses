@@ -1,6 +1,7 @@
 #include "ui/widgets/EmptyState.h"
 
 #include "ui/theme/Icons.h"
+#include "ui/theme/ThemeManager.h"
 
 #include <QFrame>
 #include <QHBoxLayout>
@@ -20,7 +21,12 @@ EmptyState::EmptyState(QWidget* parent)
     fl->setSpacing(10);
 
     auto* icon = new QLabel(frame);
-    icon->setPixmap(sesIcon(QStringLiteral("wave")).pixmap(40, 40));
+    icon->setObjectName(QStringLiteral("EmptyStateIcon"));
+    const auto refreshIcon = [icon] {
+        icon->setPixmap(sesIcon(QStringLiteral("wave")).pixmap(40, 40));
+    };
+    refreshIcon();
+    connect(ThemeManager::instance(), &ThemeManager::themeChanged, icon, refreshIcon);
     icon->setAlignment(Qt::AlignCenter);
     fl->addWidget(icon);
 
@@ -32,7 +38,7 @@ EmptyState::EmptyState(QWidget* parent)
     title->setFont(tf);
     fl->addWidget(title);
 
-    auto* sub = new QLabel(QStringLiteral("WAV imports now · FLAC/MP3 decode arrives with the audio engine (P1).\nOpen → drop → Space to play. No setup, no account."), frame);
+    auto* sub = new QLabel(QStringLiteral("Bring in a WAV to get started. Your original audio stays untouched.\nPlayback is currently in preview mode."), frame);
     sub->setProperty("role", QStringLiteral("secondary"));
     sub->setAlignment(Qt::AlignCenter);
     sub->setWordWrap(true);
@@ -40,21 +46,11 @@ EmptyState::EmptyState(QWidget* parent)
 
     auto* btns = new QHBoxLayout;
     btns->setSpacing(8);
-    auto* import = new QPushButton(sesIcon(QStringLiteral("import")), QStringLiteral(" Import audio"), frame);
+    auto* import = new QPushButton(sesIcon(QStringLiteral("import")), QStringLiteral(" Choose a WAV file"), frame);
     import->setProperty("variant", QStringLiteral("primary"));
     connect(import, &QPushButton::clicked, this, &EmptyState::importRequested);
-    auto* open = new QPushButton(sesIcon(QStringLiteral("folder")), QStringLiteral(" Open project"), frame);
-    open->setEnabled(false);
-    open->setToolTip(QStringLiteral("Project bundles (.ego) arrive with persistence (P3)"));
-    connect(open, &QPushButton::clicked, this, &EmptyState::openRequested);
-    auto* recent = new QPushButton(QStringLiteral("Recent"), frame);
-    recent->setEnabled(false);
-    recent->setToolTip(QStringLiteral("Recent projects appear here once persistence lands (P3)"));
-    connect(recent, &QPushButton::clicked, this, &EmptyState::recentRequested);
     btns->addStretch(1);
     btns->addWidget(import);
-    btns->addWidget(open);
-    btns->addWidget(recent);
     btns->addStretch(1);
     fl->addLayout(btns);
 

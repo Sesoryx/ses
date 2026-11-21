@@ -16,7 +16,7 @@ struct Settings {
     QString theme = QStringLiteral("system"); // dark | light | system
     bool snap = true;
     bool reducedMotion = false;
-    bool mixerVisible = true;
+    bool mixerVisible = false;
     bool dockVisible = true;
     double uiScale = 1.0; // 0.8..1.6
     QStringList recentProjects;

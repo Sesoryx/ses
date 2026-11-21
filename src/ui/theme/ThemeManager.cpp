@@ -5,6 +5,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPalette>
+#include <QStyle>
 #include <QStyleHints>
 #include <QWidget>
 
@@ -98,6 +99,12 @@ void ThemeManager::apply()
         return a.size() > b.size();
     });
     static const QHash<QString, QString> paletteRoles = {
+        { QStringLiteral("radius"), QStringLiteral("8px") },
+        { QStringLiteral("radiusSmall"), QStringLiteral("5px") },
+        { QStringLiteral("spacing"), QStringLiteral("8px") },
+        { QStringLiteral("fontBase"), QStringLiteral("13px") },
+        { QStringLiteral("fontSmall"), QStringLiteral("11px") },
+        { QStringLiteral("fontTitle"), QStringLiteral("15px") },
         { QStringLiteral("bg"), QStringLiteral("palette(window)") },
         { QStringLiteral("bgAlt"), QStringLiteral("palette(alternatebase)") },
         { QStringLiteral("panel"), QStringLiteral("palette(base)") },
@@ -123,10 +130,6 @@ void ThemeManager::apply()
     };
     for (const auto& k : keys)
         qss.replace(QLatin1Char('@') + k, paletteRoles.value(k, tokens.value(k)));
-    if (qApp && !styleSheetApplied_) {
-        qApp->setStyleSheet(qss);
-        styleSheetApplied_ = true;
-    }
 
     // QPalette for native dialogs / fallback. Secondary text uses the
     // contrast-checked textSecondary role — never QPalette::Mid.
@@ -161,6 +164,19 @@ void ThemeManager::apply()
         pal.setColor(QPalette::Disabled, QPalette::ButtonText, secondary);
         pal.setColor(QPalette::Disabled, QPalette::WindowText, secondary);
         qApp->setPalette(pal);
+        if (!styleSheetApplied_) {
+            qApp->setStyleSheet(qss);
+            styleSheetApplied_ = true;
+        } else {
+            // Refresh existing widgets against the changed palette without
+            // reparsing the entire app stylesheet on every theme toggle.
+            const auto widgets = QApplication::allWidgets();
+            for (QWidget* widget : widgets) {
+                widget->style()->unpolish(widget);
+                widget->style()->polish(widget);
+                widget->update();
+            }
+        }
     }
 
     emit themeChanged();

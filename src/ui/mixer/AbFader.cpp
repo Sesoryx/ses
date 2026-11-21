@@ -17,7 +17,7 @@ namespace ses::ui {
 AbFader::AbFader(QWidget* parent)
     : QWidget(parent)
 {
-    setMinimumSize(220, 34);
+    setMinimumSize(272, 34);
     setToolTip(QStringLiteral("A/B crossfader — A / B / \\ keys, center detent"));
 
     soloA_ = new QToolButton(this);
@@ -35,7 +35,7 @@ AbFader::AbFader(QWidget* parent)
     connect(soloB_, &QToolButton::clicked, this, [this] { setValue(1.0, true); });
 
     modeBtn_ = new QToolButton(this);
-    modeBtn_->setProperty("variant", QStringLiteral("chip"));
+    modeBtn_->setProperty("variant", QStringLiteral("mode"));
     modeBtn_->setToolTip(QStringLiteral("A/B mode: Crossfade (blend) or Split (A→left ear, B→right ear)"));
     connect(modeBtn_, &QToolButton::clicked, this, [this] {
         QMenu menu(this);
@@ -90,7 +90,7 @@ double AbFader::snapDetent(double v)
 void AbFader::setMode(const QString& mode)
 {
     mode_ = mode;
-    modeBtn_->setText(mode == QLatin1String("split") ? QStringLiteral("SPLIT") : QStringLiteral("XFADE"));
+    modeBtn_->setText(mode == QLatin1String("split") ? QStringLiteral("SPLIT") : QStringLiteral("MIX"));
 }
 
 void AbFader::setValue(double v, bool animate)
@@ -112,17 +112,17 @@ void AbFader::setValue(double v, bool animate)
 
 QRect AbFader::grooveRect() const
 {
-    return rect().adjusted(34, 0, -88, 0);
+    return rect().adjusted(30, 0, -112, 0);
 }
 
 void AbFader::layoutButtons()
 {
     const int h = height();
-    soloA_->setGeometry(0, (h - 22) / 2, 26, 22);
+    soloA_->setGeometry(0, (h - 22) / 2, 24, 22);
     const QRect g = grooveRect();
-    soloB_->setGeometry(g.right() + 6, (h - 22) / 2, 26, 22);
-    modeBtn_->setGeometry(g.right() + 36, (h - 22) / 2, 46, 22);
-    moreBtn_->setGeometry(width() - 24, (h - 22) / 2, 22, 22);
+    soloB_->setGeometry(g.right() + 5, (h - 22) / 2, 24, 22);
+    modeBtn_->setGeometry(g.right() + 33, (h - 22) / 2, 52, 22);
+    moreBtn_->setGeometry(width() - 24, (h - 22) / 2, 20, 22);
 }
 
 void AbFader::resizeEvent(QResizeEvent*)

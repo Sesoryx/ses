@@ -72,7 +72,7 @@ Settings Settings::fromJson(const QJsonObject& o)
     s.theme = (theme == "dark" || theme == "light") ? theme : QStringLiteral("system");
     s.snap = o.value(QStringLiteral("snap")).toBool(true);
     s.reducedMotion = o.value(QStringLiteral("reducedMotion")).toBool(false);
-    s.mixerVisible = o.value(QStringLiteral("mixerVisible")).toBool(true);
+    s.mixerVisible = o.value(QStringLiteral("mixerVisible")).toBool(false);
     s.dockVisible = o.value(QStringLiteral("dockVisible")).toBool(true);
     const double scale = o.value(QStringLiteral("uiScale")).toDouble(1.0);
     s.uiScale = std::clamp(scale, 0.8, 1.6);

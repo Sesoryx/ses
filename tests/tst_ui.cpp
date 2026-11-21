@@ -6,6 +6,7 @@
 #include "ui/shell/MainWindow.h"
 #include "ui/shell/Smoke.h"
 #include "ui/shell/Transport.h"
+#include "ui/theme/Icons.h"
 #include "ui/theme/ThemeManager.h"
 #include "ui/timeline/TimelineWidget.h"
 
@@ -14,6 +15,7 @@
 #include <QLineEdit>
 #include <QPalette>
 #include <QStandardPaths>
+#include <QStyle>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -35,14 +37,35 @@ private slots:
         w.applyThemeMode(QStringLiteral("dark"));
         const QString darkBg = tm->color(QStringLiteral("bg")).name();
         QVERIFY(qApp->styleSheet().contains(QStringLiteral("palette(window)")));
+        QVERIFY(qApp->styleSheet().contains(QStringLiteral("palette(mid)")));
         QCOMPARE(qApp->palette().color(QPalette::Window).name(), darkBg);
+        QCOMPARE(w.palette().color(QPalette::Window).name(), darkBg);
         QVERIFY(tm->isDark());
+        auto iconPixel = [] {
+            const QImage image = sesIcon(QStringLiteral("play")).pixmap(24, 24).toImage();
+            QColor result;
+            int maxAlpha = 0;
+            for (int y = 0; y < image.height(); ++y) {
+                for (int x = 0; x < image.width(); ++x) {
+                    const QColor pixel = image.pixelColor(x, y);
+                    if (pixel.alpha() > maxAlpha) {
+                        maxAlpha = pixel.alpha();
+                        result = pixel;
+                    }
+                }
+            }
+            return result;
+        };
+        QCOMPARE(iconPixel().rgb(), tm->color(QStringLiteral("text")).rgb());
 
         w.applyThemeMode(QStringLiteral("light"));
         const QString lightBg = tm->color(QStringLiteral("bg")).name();
         QVERIFY(qApp->styleSheet().contains(QStringLiteral("palette(window)")));
+        QVERIFY(qApp->styleSheet().contains(QStringLiteral("palette(mid)")));
         QCOMPARE(qApp->palette().color(QPalette::Window).name(), lightBg);
+        QCOMPARE(w.palette().color(QPalette::Window).name(), lightBg);
         QVERIFY(!tm->isDark());
+        QCOMPARE(iconPixel().rgb(), tm->color(QStringLiteral("text")).rgb());
         QCOMPARE(ses::core::Settings::load().theme, QStringLiteral("light"));
 
         // Secondary text uses the contrast-checked role, never Mid.

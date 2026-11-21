@@ -22,7 +22,7 @@ public:
     void setMode(const QString& mode); // "crossfade" | "split"
 
     static double snapDetent(double v);
-    QSize sizeHint() const override { return { 250, 34 }; }
+    QSize sizeHint() const override { return { 272, 34 }; }
 
 signals:
     void valueChanged(double v);          // user/animation driven → command

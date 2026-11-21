@@ -3,7 +3,6 @@
 #include "core/persistence/Settings.h"
 #include "ui/theme/Icons.h"
 
-#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QToolButton>
@@ -15,44 +14,39 @@ CoachMarks::CoachMarks(core::Settings* settings, QWidget* parent)
     : QWidget(parent), settings_(settings)
 {
     auto* outer = new QVBoxLayout(this);
-    outer->setContentsMargins(8, 6, 8, 0);
+    outer->setContentsMargins(10, 2, 8, 0);
     outer->setSpacing(0);
     auto* row = new QHBoxLayout;
     row->setSpacing(8);
     outer->addLayout(row);
 
     const struct Tip { const char* id; const char* text; } tips[] = {
-        { "drop", "Drop a WAV anywhere to import it." },
-        { "split", "S splits the selected clip at the playhead." },
-        { "ab", "A / B / \\ compares two versions instantly." },
+        { "drop", "Drop a WAV to import" },
+        { "split", "S to split at playhead" },
+        { "ab", "A / B to compare" },
     };
-    for (const auto& tip : tips) {
-        if (settings_->dismissedCoachMarks.contains(QLatin1String(tip.id)))
-            continue;
-        auto* mark = new QFrame(this);
-        mark->setObjectName(QStringLiteral("CoachMark"));
-        auto* hl = new QHBoxLayout(mark);
-        hl->setContentsMargins(10, 4, 6, 4);
-        hl->setSpacing(6);
-        auto* label = new QLabel(QString::fromUtf8(tip.text), mark);
-        label->setProperty("role", QStringLiteral("secondary"));
-        auto* close = new QToolButton(mark);
-        close->setIcon(sesIcon(QStringLiteral("close")));
-        close->setIconSize(QSize(12, 12));
-        close->setToolTip(QStringLiteral("Dismiss"));
-        const QString id = QLatin1String(tip.id);
-        connect(close, &QToolButton::clicked, this, [this, id, mark] {
+    QStringList visibleTips;
+    for (const auto& tip : tips)
+        if (!settings_->dismissedCoachMarks.contains(QLatin1String(tip.id)))
+            visibleTips.append(QString::fromUtf8(tip.text));
+
+    auto* label = new QLabel(visibleTips.join(QStringLiteral("   ·   ")), this);
+    label->setProperty("role", QStringLiteral("secondary"));
+    row->addWidget(label);
+    row->addStretch(1);
+
+    auto* close = new QToolButton(this);
+    close->setIcon(sesIcon(QStringLiteral("close")));
+    close->setIconSize(QSize(12, 12));
+    close->setToolTip(QStringLiteral("Dismiss tips"));
+    connect(close, &QToolButton::clicked, this, [this] {
+        for (const QString& id : { QStringLiteral("drop"), QStringLiteral("split"), QStringLiteral("ab") })
             if (!settings_->dismissedCoachMarks.contains(id))
                 settings_->dismissedCoachMarks.append(id);
-            settings_->save();
-            mark->deleteLater();
-            refresh();
-        });
-        hl->addWidget(label);
-        hl->addWidget(close);
-        row->addWidget(mark);
-    }
-    row->addStretch(1);
+        settings_->save();
+        refresh();
+    });
+    row->addWidget(close);
     refresh();
 }
 
