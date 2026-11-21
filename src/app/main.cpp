@@ -80,7 +80,10 @@ int main(int argc, char** argv)
     const QString logDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/logs");
     QDir().mkpath(logDir);
     g_log = new QFile(logDir + QStringLiteral("/ses.log"));
-    g_log->open(QIODevice::WriteOnly | QIODevice::Truncate);
+    if (!g_log->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        delete g_log;
+        g_log = nullptr; // Logging is best-effort; startup must still work.
+    }
     qInstallMessageHandler(messageHandler);
 
     const bool headlessGate = parser.isSet(smokeOpt) || parser.isSet(shotOpt);

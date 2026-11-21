@@ -3,6 +3,8 @@
 
 #include <QtTest>
 
+#include <limits>
+
 using namespace ses::engine;
 
 class TestEngineCore : public QObject {
@@ -57,6 +59,33 @@ private slots:
         BlockMixer mixer;
         QVERIFY(!mixer.setClip(BlockMixer::MaxClips, {}));
         QVERIFY(!mixer.setClip(0, { nullptr, 1, 0, 1.0f, 0.0f, false }));
+        const float sample = 0.0f;
+        QVERIFY(!mixer.setClip(0, { &sample,
+                                    std::numeric_limits<std::size_t>::max() / 2 + 1,
+                                    0, 1.0f, 0.0f, false }));
+    }
+
+    void blockMixerHandlesExtremeTimelineAndNonFiniteValues()
+    {
+        const float source[] = { 1.0f, std::numeric_limits<float>::quiet_NaN(),
+                                 std::numeric_limits<float>::infinity(), -1.0f };
+        BlockMixer mixer;
+        QVERIFY(mixer.setClip(0, { source, 2, std::numeric_limits<long long>::max(),
+                                   std::numeric_limits<float>::quiet_NaN(),
+                                   std::numeric_limits<float>::infinity(), false }));
+        float output[4] = { 9, 9, 9, 9 };
+        mixer.render(std::numeric_limits<long long>::min(), 2, output);
+        QCOMPARE(output[0], 0.0f);
+        QCOMPARE(output[1], 0.0f);
+        mixer.render(std::numeric_limits<long long>::max(), 2, output);
+        QCOMPARE(output[0], 1.0f); // invalid gain/pan are made safe
+        QCOMPARE(output[1], 0.0f); // non-finite source samples are silence
+        QCOMPARE(output[2], 0.0f);
+        QCOMPARE(output[3], -1.0f);
+
+        float sentinel = 7.0f;
+        mixer.render(0, std::numeric_limits<std::size_t>::max() / 2 + 1, &sentinel);
+        QCOMPARE(sentinel, 7.0f); // reject output-size overflow without writing
     }
 };
 

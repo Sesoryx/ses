@@ -113,13 +113,13 @@ double readSample(const QByteArray& frame, const FmtInfo& fmt, int ch)
             const uint32_t u = qFromLittleEndian<uint32_t>(p);
             float v;
             std::memcpy(&v, &u, 4);
-            return v;
+            return std::isfinite(v) ? v : 0.0;
         }
         if (fmt.bits == 64) {
             const uint64_t u = qFromLittleEndian<uint64_t>(p);
             double v;
             std::memcpy(&v, &u, 8);
-            return v;
+            return std::isfinite(v) ? v : 0.0;
         }
         return 0.0;
     }
@@ -264,7 +264,7 @@ Peaks computeWavPeaks(const QString& path, int buckets)
             double mix = 0.0;
             for (int ch = 0; ch < fmt.channels; ++ch)
                 mix += readSample(frameData, fmt, ch);
-            mix /= fmt.channels;
+            mix = std::clamp(mix / fmt.channels, -1.0, 1.0);
             const float v = float(mix);
             if (abs % perBucket == 0) {
                 peaks.min[b] = v;

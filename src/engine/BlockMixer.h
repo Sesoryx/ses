@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
+#include <type_traits>
 
 namespace ses::engine {
 
@@ -23,10 +25,11 @@ public:
 
     bool setClip(std::size_t index, ClipView clip) noexcept
     {
-        if (index >= MaxClips || (clip.frames != 0 && clip.samples == nullptr))
+        if (index >= MaxClips || (clip.frames != 0 && clip.samples == nullptr)
+            || clip.frames > std::numeric_limits<std::size_t>::max() / 2)
             return false;
-        clip.gain = std::clamp(clip.gain, 0.0f, 4.0f);
-        clip.pan = std::clamp(clip.pan, -1.0f, 1.0f);
+        clip.gain = std::isfinite(clip.gain) ? std::clamp(clip.gain, 0.0f, 4.0f) : 1.0f;
+        clip.pan = std::isfinite(clip.pan) ? std::clamp(clip.pan, -1.0f, 1.0f) : 0.0f;
         clips_[index] = clip;
         if (index >= clipCount_)
             clipCount_ = index + 1;
@@ -43,7 +46,7 @@ public:
     // buffer. Missing/finished clips contribute silence; the output is replaced.
     void render(long long playhead, std::size_t frames, float* output) const noexcept
     {
-        if (!output)
+        if (!output || frames > std::numeric_limits<std::size_t>::max() / 2)
             return;
         std::fill_n(output, frames * 2, 0.0f);
         for (std::size_t c = 0; c < clipCount_; ++c) {
@@ -52,22 +55,30 @@ public:
                 continue;
             std::size_t outOffset = 0;
             std::size_t sourceOffset = 0;
+            using UnsignedTimeline = std::make_unsigned_t<long long>;
             if (playhead < clip.timelineStart) {
-                const auto untilStart = static_cast<unsigned long long>(clip.timelineStart - playhead);
+                // Unsigned subtraction represents the full signed distance,
+                // including ranges that would overflow signed arithmetic.
+                const auto untilStart = static_cast<UnsignedTimeline>(clip.timelineStart)
+                    - static_cast<UnsignedTimeline>(playhead);
                 if (untilStart >= frames)
                     continue;
                 outOffset = static_cast<std::size_t>(untilStart);
             } else {
-                sourceOffset = static_cast<std::size_t>(playhead - clip.timelineStart);
-                if (sourceOffset >= clip.frames)
+                const auto elapsed = static_cast<UnsignedTimeline>(playhead)
+                    - static_cast<UnsignedTimeline>(clip.timelineStart);
+                if (elapsed >= clip.frames)
                     continue;
+                sourceOffset = static_cast<std::size_t>(elapsed);
             }
             const std::size_t count = std::min(frames - outOffset, clip.frames - sourceOffset);
             const float leftPan = clip.pan > 0.0f ? 1.0f - clip.pan : 1.0f;
             const float rightPan = clip.pan < 0.0f ? 1.0f + clip.pan : 1.0f;
             for (std::size_t i = 0; i < count; ++i) {
-                output[(outOffset + i) * 2] += clip.samples[(sourceOffset + i) * 2] * clip.gain * leftPan;
-                output[(outOffset + i) * 2 + 1] += clip.samples[(sourceOffset + i) * 2 + 1] * clip.gain * rightPan;
+                const float left = clip.samples[(sourceOffset + i) * 2];
+                const float right = clip.samples[(sourceOffset + i) * 2 + 1];
+                output[(outOffset + i) * 2] += (std::isfinite(left) ? left : 0.0f) * clip.gain * leftPan;
+                output[(outOffset + i) * 2 + 1] += (std::isfinite(right) ? right : 0.0f) * clip.gain * rightPan;
             }
         }
     }

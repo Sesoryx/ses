@@ -6,16 +6,51 @@
 #include "core/persistence/Settings.h"
 #include "core/render/FadeCurve.h"
 
+#include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRandomGenerator>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QtEndian>
 #include <QtTest>
+
+#include <cmath>
+#include <cstring>
+#include <limits>
 
 using namespace ses::core;
 
 namespace {
+
+bool writeFloatWav(const QString& path, const QVector<float>& samples)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly))
+        return false;
+    const auto put16 = [&file](uint16_t value) {
+        char bytes[2];
+        qToLittleEndian(value, bytes);
+        return file.write(bytes, sizeof(bytes)) == sizeof(bytes);
+    };
+    const auto put32 = [&file](uint32_t value) {
+        char bytes[4];
+        qToLittleEndian(value, bytes);
+        return file.write(bytes, sizeof(bytes)) == sizeof(bytes);
+    };
+    const uint32_t dataSize = uint32_t(samples.size() * sizeof(float));
+    if (file.write("RIFF", 4) != 4 || !put32(36 + dataSize) || file.write("WAVEfmt ", 8) != 8
+        || !put32(16) || !put16(3) || !put16(1) || !put32(48000) || !put32(192000)
+        || !put16(4) || !put16(32) || file.write("data", 4) != 4 || !put32(dataSize))
+        return false;
+    for (float sample : samples) {
+        uint32_t bits;
+        std::memcpy(&bits, &sample, sizeof(bits));
+        if (!put32(bits))
+            return false;
+    }
+    return file.error() == QFile::NoError;
+}
 
 Project sampleProject()
 {
@@ -396,6 +431,34 @@ private slots:
         const Settings newer = Settings::load();
         QCOMPARE(newer.schemaVersion, Settings::kSchemaVersion + 1);
         QCOMPARE(newer.toJson().value(QStringLiteral("schemaVersion")).toInt(), Settings::kSchemaVersion + 1);
+    }
+
+    void floatWavPeaksSanitizeNonFiniteAndOutOfRangeSamples()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.path() + QStringLiteral("/float.wav");
+        const QVector<float> samples{ std::numeric_limits<float>::quiet_NaN(),
+                                      std::numeric_limits<float>::infinity(), 3.0f, -3.0f };
+        QVERIFY(writeFloatWav(path, samples));
+        const MediaInfo info = probeWav(path);
+        QVERIFY2(info.ok, qPrintable(info.error));
+
+        const Peaks peaks = computeWavPeaks(path, samples.size());
+        QVERIFY(peaks.valid());
+        QCOMPARE(peaks.min.size(), samples.size());
+        for (int i = 0; i < peaks.min.size(); ++i) {
+            QVERIFY(std::isfinite(peaks.min[i]));
+            QVERIFY(std::isfinite(peaks.max[i]));
+            QVERIFY(peaks.min[i] >= -1.0f);
+            QVERIFY(peaks.max[i] <= 1.0f);
+        }
+        QCOMPARE(peaks.min[0], 0.0f);
+        QCOMPARE(peaks.max[0], 0.0f);
+        QCOMPARE(peaks.min[1], 0.0f);
+        QCOMPARE(peaks.max[1], 0.0f);
+        QCOMPARE(peaks.min[2], 1.0f);
+        QCOMPARE(peaks.max[3], -1.0f);
     }
 
     void wavProbeAndPeaks()
