@@ -8,6 +8,7 @@
 #include "engine/Engine.h"
 
 #include <QElapsedTimer>
+#include <QMetaType>
 #include <QObject>
 #include <QTimer>
 
@@ -38,9 +39,14 @@ signals:
     void playheadChanged(int64_t sample);
     void playingChanged(bool playing);
     void loopChanged(bool on);
+    // P1 task 4: the 30 Hz engine drain (ROADMAP §7) — telemetry feeds the
+    // meters; device events are the hook for the task-7 recovery path.
+    void telemetryUpdated(const ses::engine::Telemetry& t);
+    void deviceEvent(ses::engine::DeviceEvent e);
 
 private:
     void tick();
+    void drainEngine(); // P1 task 4: SpscRing drains → signals, GUI thread
     void setPlaying(bool on);
 
     core::ProjectModel* model_;
@@ -55,3 +61,7 @@ private:
 };
 
 } // namespace ses::ui
+
+// The drain signals may also be connected queued (worker-side consumers later).
+Q_DECLARE_METATYPE(ses::engine::Telemetry)
+Q_DECLARE_METATYPE(ses::engine::DeviceEvent)

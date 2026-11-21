@@ -7,8 +7,13 @@ namespace ses::ui {
 Transport::Transport(core::ProjectModel* model, engine::Engine* engine, QObject* parent)
     : QObject(parent), model_(model), engine_(engine)
 {
-    timer_.setInterval(33); // ~30 Hz telemetry/pull rate (DESIGN.md §2)
+    qRegisterMetaType<engine::Telemetry>();
+    qRegisterMetaType<engine::DeviceEvent>();
+    timer_.setInterval(33); // 30 Hz: telemetry drain + playhead pull (DESIGN.md §2)
     connect(&timer_, &QTimer::timeout, this, &Transport::tick);
+    // The drain starts with the pump (play()) and outlives stop() in engine
+    // mode (meters decay, device events arrive). Before first play the callback
+    // has never run, so the rings are provably empty — nothing to drain.
 }
 
 void Transport::setPlaying(bool on)
@@ -39,8 +44,12 @@ void Transport::play()
 
 void Transport::stop()
 {
-    if (!previewMode())
+    if (!previewMode()) {
         engine_->stop();
+        // Keep the drain alive: the pump still emits silence telemetry (meters
+        // decay) and device events can arrive any time (P1 task 7).
+        return;
+    }
     setPlaying(false);
     timer_.stop();
 }
@@ -83,10 +92,33 @@ void Transport::setLoop(bool on)
     emit loopChanged(on);
 }
 
+void Transport::drainEngine()
+{
+    // Aggregate one 30 Hz window per signal: latest playhead/counters, max peak.
+    // Full rings drop pushes (never block); a dropped batch is a meter tick.
+    engine::Telemetry batch {};
+    engine::Telemetry t {};
+    float peak = 0.0f;
+    bool any = false;
+    while (engine_->nextTelemetry(t)) {
+        batch = t;
+        peak = std::max(peak, t.masterPeak);
+        any = true;
+    }
+    if (any) {
+        batch.masterPeak = peak;
+        emit telemetryUpdated(batch);
+    }
+    engine::DeviceEvent e {};
+    while (engine_->nextDeviceEvent(e))
+        emit deviceEvent(e);
+}
+
 void Transport::tick()
 {
     if (!previewMode()) {
-        // Real engine: pull authoritative state (telemetry ring drain in P1).
+        drainEngine(); // P1 task 4: rings → meters (30 Hz)
+        // Real engine: pull authoritative state (playhead/playing atomics).
         const auto st = engine_->state();
         if (st.playhead != playhead_) {
             playhead_ = st.playhead;

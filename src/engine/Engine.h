@@ -36,6 +36,11 @@ public:
     virtual void setLoop(bool on, int64_t start, int64_t end) = 0;
     virtual void setAbFader(double x) = 0; // RT parameter command, smoothed
     virtual TransportState state() const = 0;
+
+    // GUI-thread drains for the 30 Hz telemetry/meter path (P1 task 4).
+    // False when nothing is queued (or no device is attached).
+    virtual bool nextTelemetry(Telemetry& out) = 0;
+    virtual bool nextDeviceEvent(DeviceEvent& out) = 0;
 };
 
 // Inert placeholder: reports unavailable, remembers nothing. Never pretends
@@ -49,6 +54,8 @@ public:
     void setLoop(bool, int64_t, int64_t) override {}
     void setAbFader(double) override {}
     TransportState state() const override { return {}; }
+    bool nextTelemetry(Telemetry&) override { return false; }
+    bool nextDeviceEvent(DeviceEvent&) override { return false; }
 };
 
 // Real device-backed engine (ROADMAP P1 task 3). Owns the AudioDevice and
@@ -85,9 +92,9 @@ public:
     void setAbFader(double x) override; // RT parameter command, smoothed (P4)
     TransportState state() const override;
 
-    // GUI-thread drains for events and meters (wired to the UI in P1 task 4).
-    bool nextTelemetry(Telemetry& out);
-    bool nextDeviceEvent(DeviceEvent& out);
+    // GUI-thread drains for events and meters (30 Hz QTimer in ui::Transport).
+    bool nextTelemetry(Telemetry& out) override;
+    bool nextDeviceEvent(DeviceEvent& out) override;
 
     int actualSampleRate() const; // 0 when no device is open
 

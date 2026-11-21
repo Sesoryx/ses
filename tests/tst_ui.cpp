@@ -3,6 +3,7 @@
 #include "core/media/MediaProbe.h"
 #include "core/persistence/Settings.h"
 #include "ui/mixer/AbFader.h"
+#include "ui/mixer/MixerPanel.h"
 #include "ui/shell/MainWindow.h"
 #include "ui/shell/Smoke.h"
 #include "ui/shell/Transport.h"
@@ -126,6 +127,57 @@ private slots:
         QVERIFY(std::abs(tl->sampleAtX(300) - anchor) <= 2);
         tl->zoomToFit();
         QVERIFY(tl->xOfSample(w.model().project().duration()) <= tl->viewport()->width());
+    }
+
+    void metersMoveAndDecayHonestly()
+    {
+        // Honest idle: with metering off, peaks are ignored — no fake signal.
+        LevelMeter idle;
+        idle.setPeak(0.5f);
+        QCOMPARE(idle.level(), 0.0);
+        QCOMPARE(idle.peakHold(), 0.0);
+
+        LevelMeter m;
+        m.setMeteringEnabled(true);
+        m.setPeak(0.5f);
+        QCOMPARE(m.level(), 0.5);
+        QCOMPARE(m.peakHold(), 0.5);
+        QVERIFY(!m.clip());
+        m.setPeak(1.2f); // over full scale latches clip…
+        QVERIFY(m.clip());
+
+        // The master meter is the sink the 30 Hz drain feeds.
+        ses::core::ProjectModel model;
+        MixerPanel panel(&model);
+        panel.setMeteringEnabled(true);
+        QVERIFY(panel.masterMeter() != nullptr);
+        QVERIFY(panel.masterMeter()->meteringEnabled());
+        panel.setMasterPeak(0.25f);
+        QCOMPARE(panel.masterMeter()->level(), 0.25);
+
+        // Silence decays to zero — the bar never freezes at a stale level…
+        QTRY_VERIFY_WITH_TIMEOUT(m.level() == 0.0 && m.peakHold() == 0.0, 5000);
+        QVERIFY(!m.clip()); // …and the clip latch clears with the signal
+        panel.setMeteringEnabled(false);
+        QCOMPARE(panel.masterMeter()->level(), 0.0);
+    }
+
+    void telemetryDrainRunsAt30Hz()
+    {
+        // End-to-end plumbing: null-backend device → SpscRing → the 30 Hz
+        // Transport drain → telemetryUpdated (the signal meters subscribe to).
+        ses::core::ProjectModel model;
+        ses::engine::DeviceEngine engine;
+        if (!engine.openOnNullBackend())
+            QSKIP("null audio backend unavailable");
+        Transport transport(&model, &engine);
+        int updates = 0;
+        connect(&transport, &Transport::telemetryUpdated,
+                [&updates](const ses::engine::Telemetry&) { ++updates; });
+        transport.play();
+        QTRY_VERIFY_WITH_TIMEOUT(updates >= 3, 2000); // several 30 Hz ticks
+        QVERIFY(transport.playing());
+        transport.stop();
     }
 
     void smokeJourney()

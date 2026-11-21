@@ -515,6 +515,13 @@ void MainWindow::wireModel()
         loopBtn_->blockSignals(false);
     });
 
+    // P1 task 4: the 30 Hz telemetry drain (Transport) feeds the master meter.
+    mixer_->setMeteringEnabled(!transport_->previewMode());
+    connect(transport_, &Transport::telemetryUpdated, this,
+            [this](const engine::Telemetry& t) { mixer_->setMasterPeak(t.masterPeak); });
+    // Transport::deviceEvent is the P1 task 7 hook (device-loss recovery +
+    // status bar); its ring drain already runs on the same 30 Hz timer.
+
     connect(timeline_, &TimelineWidget::selectionChanged, this, [this](const QStringList& ids) {
         ai_->setSelectionScope(ids);
         selectionLabel_->setText(ids.isEmpty() ? QStringLiteral("no selection")
