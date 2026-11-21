@@ -10,6 +10,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRandomGenerator>
+#include <QSet>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtEndian>
@@ -358,51 +359,179 @@ private slots:
             m.insertTrack(i, t);
             Clip c;
             c.id = QStringLiteral("c%1").arg(i);
-            c.mediaId = QStringLiteral("m");
+            c.mediaId = media.id;
             c.timelineStart = i * 10000;
             c.length = 20000;
+            c.fadeIn = Fade{ 1000, QStringLiteral("equalPower"), {} };
+            c.fadeOut = Fade{ 2000, QStringLiteral("sCurve"), {} };
             m.insertClip(t.id, 0, c);
         }
-        const QJsonObject initial = m.project().toJson();
 
-        auto* rng = QRandomGenerator::global();
-        for (int step = 0; step < 200; ++step) {
-            QStringList ids;
-            for (const auto& t : m.project().tracks)
-                for (const auto& c : t.clips)
-                    ids.append(c.id);
-            if (ids.isEmpty())
-                break;
-            const QString id = ids[rng->bounded(ids.size())];
-            const ClipTrim tr = m.clipTrim(id);
-            switch (rng->bounded(5)) {
-            case 0:
-                m.push(new TrimClipCommand(&m, id, ClipTrim{ tr.sourceOffset, tr.length, tr.timelineStart + int(rng->bounded(2000)) - 1000 }));
-                break;
-            case 1:
-                m.push(new SetClipGainCommand(&m, id, rng->bounded(200) / 100.0));
-                break;
-            case 2:
-                m.push(new SetFadeCommand(&m, id, rng->bounded(2) == 0, Fade{ int64_t(rng->bounded(3000)), QStringLiteral("linear"), {} }));
-                break;
-            case 3:
-                m.push(new SetAbFaderCommand(&m, rng->bounded(100) / 100.0));
-                break;
-            case 4: {
-                const QString tid = m.trackIdOfClip(id);
-                m.push(new SetAbRoutingCommand(&m, tid, rng->bounded(2) == 0 ? QStringLiteral("A") : QStringLiteral("both")));
-                break;
+        QRandomGenerator rng(0x5e5u); // Failures must be exactly reproducible.
+        QVector<QJsonObject> history{ m.project().toJson() };
+        int nextTrack = 2;
+        int nextClip = 2;
+
+        const auto addTrack = [&]() -> QUndoCommand* {
+            Track t;
+            t.id = QStringLiteral("t%1").arg(nextTrack++);
+            t.name = QStringLiteral("Track %1").arg(nextTrack);
+            return new AddTrackCommand(&m, t, rng.bounded(m.project().tracks.size() + 1));
+        };
+        const auto addClip = [&]() -> QUndoCommand* {
+            const auto& tracks = m.project().tracks;
+            const QString trackId = tracks[rng.bounded(tracks.size())].id;
+            Clip c;
+            c.id = QStringLiteral("c%1").arg(nextClip++);
+            c.mediaId = media.id;
+            c.timelineStart = rng.bounded(100000);
+            c.sourceOffset = rng.bounded(80000);
+            c.length = rng.bounded(1, int(media.frames - c.sourceOffset + 1));
+            c.fadeIn = Fade{ int64_t(rng.bounded(int(c.length + 1))), QStringLiteral("linear"), {} };
+            return new AddClipCommand(&m, trackId, c);
+        };
+        const auto checkState = [&](int step, const char* action) {
+            const QString context = QStringLiteral("step %1 (%2)").arg(step).arg(QString::fromLatin1(action));
+            const QJsonObject state = m.project().toJson();
+            QVERIFY2(state == history[m.undoStack().index()], qPrintable(context + QStringLiteral(": wrong history state")));
+            QVERIFY2(Project::fromJson(state).toJson() == state,
+                     qPrintable(context + QStringLiteral(": JSON round-trip changed the state")));
+
+            QSet<QString> trackIds;
+            QSet<QString> clipIds;
+            for (const Track& t : m.project().tracks) {
+                QVERIFY2(!t.id.isEmpty() && !trackIds.contains(t.id),
+                         qPrintable(context + QStringLiteral(": duplicate/empty track id")));
+                trackIds.insert(t.id);
+                QVERIFY2(t.gain >= 0.0 && t.gain <= 4.0 && t.pan >= -1.0 && t.pan <= 1.0,
+                         qPrintable(context + QStringLiteral(": invalid track parameters")));
+                for (const Clip& c : t.clips) {
+                    QVERIFY2(!c.id.isEmpty() && !clipIds.contains(c.id),
+                             qPrintable(context + QStringLiteral(": duplicate/empty clip id")));
+                    clipIds.insert(c.id);
+                    QVERIFY2(c.mediaId == media.id && c.timelineStart >= 0 && c.sourceOffset >= 0
+                                 && c.length >= 0 && c.sourceOffset + c.length <= media.frames,
+                             qPrintable(context + QStringLiteral(": clip escaped media bounds")));
+                    QVERIFY2(c.fadeIn.length >= 0 && c.fadeIn.length <= c.length
+                                 && c.fadeOut.length >= 0 && c.fadeOut.length <= c.length,
+                             qPrintable(context + QStringLiteral(": fade escaped clip bounds")));
+                }
             }
+            QCOMPARE(m.project().clipCount(), clipIds.size());
+        };
+
+        for (int step = 0; step < 600; ++step) {
+            auto& stack = m.undoStack();
+            // Deterministically visit both directions and then branch after undo.
+            if (step % 13 == 9 && stack.canUndo()) {
+                stack.undo();
+                checkState(step, "undo");
+                continue;
             }
+            if (step % 13 == 10 && stack.canRedo()) {
+                stack.redo();
+                checkState(step, "redo");
+                continue;
+            }
+
+            const int previousIndex = stack.index();
+            if (m.project().tracks.isEmpty()) {
+                m.push(addTrack());
+            } else if (m.project().clipCount() == 0) {
+                m.push(addClip());
+            } else {
+                QStringList clipIds;
+                for (const auto& t : m.project().tracks)
+                    for (const auto& c : t.clips)
+                        clipIds.append(c.id);
+                const QString clipId = clipIds[rng.bounded(clipIds.size())];
+                const QString trackId = m.trackIdOfClip(clipId);
+                const ClipTrim tr = m.clipTrim(clipId);
+
+                switch (rng.bounded(12)) {
+                case 0:
+                    m.push(new TrimClipCommand(&m, clipId,
+                        ClipTrim{ rng.bounded(-2000, 100000), rng.bounded(-1000, 40000),
+                                  rng.bounded(-5000, 120000) }));
+                    break;
+                case 1:
+                    m.push(new MoveClipsCommand(&m,
+                        QMap<QString, ClipTrim>{ { clipId, { tr.sourceOffset, tr.length,
+                            rng.bounded(-5000, 120000) } } }));
+                    break;
+                case 2:
+                    m.push(new SetClipGainCommand(&m, clipId, rng.bounded(-100, 501) / 100.0));
+                    break;
+                case 3:
+                    m.push(new SetFadeCommand(&m, clipId, rng.bounded(2) == 0,
+                        Fade{ rng.bounded(-1000, 50000), QStringLiteral("exp"), {} }));
+                    break;
+                case 4:
+                    if (tr.length > 1) {
+                        auto* split = new SplitClipsCommand(&m, clipId,
+                            tr.timelineStart + rng.bounded(1, int(tr.length)));
+                        if (split->isValid())
+                            m.push(split);
+                        else
+                            delete split;
+                    }
+                    break;
+                case 5:
+                    m.push(new RemoveClipsCommand(&m, { clipId, clipId }));
+                    break;
+                case 6:
+                    m.push(addClip());
+                    break;
+                case 7:
+                    m.push(addTrack());
+                    break;
+                case 8:
+                    m.push(new RemoveTrackCommand(&m, trackId));
+                    break;
+                case 9:
+                    m.push(new SetTrackParamCommand(&m, trackId, TrackField::Gain,
+                                                    rng.bounded(-100, 501) / 100.0));
+                    break;
+                case 10:
+                    if (rng.bounded(2) == 0)
+                        m.push(new SetAbFaderCommand(&m, rng.bounded(-100, 201) / 100.0));
+                    else
+                        m.push(new SetAbModeCommand(&m, rng.bounded(2) == 0
+                            ? QStringLiteral("split") : QStringLiteral("invalid")));
+                    break;
+                case 11:
+                    m.push(new SetAbRoutingCommand(&m, trackId, rng.bounded(2) == 0
+                        ? QStringLiteral("A") : QStringLiteral("both")));
+                    break;
+                }
+            }
+
+            const int index = m.undoStack().index();
+            const QJsonObject state = m.project().toJson();
+            QCOMPARE(m.undoStack().count(), index); // push() always discards the redo tail
+            if (index == previousIndex) {
+                // A merged command replaces the expected state at the current position.
+                history.resize(index + 1);
+                history[index] = state;
+            } else {
+                QCOMPARE(index, previousIndex + 1);
+                history.resize(index);
+                history.append(state);
+            }
+            QCOMPARE(m.undoStack().count() + 1, history.size());
+            checkState(step, "push/merge");
         }
-        const QJsonObject final = m.project().toJson();
-        const int depth = m.undoStack().count();
-        for (int i = 0; i < depth; ++i)
+
+        while (m.undoStack().canUndo()) {
             m.undoStack().undo();
-        QCOMPARE(m.project().toJson(), initial);
-        for (int i = 0; i < depth; ++i)
+            checkState(600, "full undo");
+        }
+        QCOMPARE(m.project().toJson(), history.first());
+        while (m.undoStack().canRedo()) {
             m.undoStack().redo();
-        QCOMPARE(m.project().toJson(), final);
+            checkState(601, "full redo");
+        }
+        QCOMPARE(m.project().toJson(), history.last());
     }
 
     void settingsNormalize()
