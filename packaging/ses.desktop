@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=ses
+GenericName=Audio Workstation
+Comment=Local-first audio workstation
+Exec=ses %F
+Icon=ses
+Terminal=false
+Categories=AudioVideo;Audio;Recorder;Qt;
+MimeType=audio/x-wav;audio/flac;audio/mpeg;audio/mp4;audio/ogg;
+StartupWMClass=ses

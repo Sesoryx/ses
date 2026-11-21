@@ -6,6 +6,7 @@
 #include "ui/shell/MainWindow.h"
 #include "ui/shell/Smoke.h"
 #include "ui/shell/Transport.h"
+#include "ui/theme/Icons.h"
 #include "ui/theme/ThemeManager.h"
 #include "ui/timeline/TimelineWidget.h"
 
@@ -64,6 +65,13 @@ int main(int argc, char** argv)
     QApplication::setOrganizationName(QStringLiteral("ses"));
     QApplication::setApplicationVersion(QStringLiteral("0.1.0"));
     QApplication::setFont(QFontDatabase::systemFont(QFontDatabase::GeneralFont));
+
+    // App identity for the window managers (DESIGN §12): the icon goes to
+    // _NET_WM_ICON (X11/XWayland), and the desktop file name lets Wayland
+    // compositors match packaging/ses.desktop for the taskbar/dock icon.
+    // Without both, shells show their generic placeholder icon.
+    QGuiApplication::setDesktopFileName(QStringLiteral("ses"));
+    QApplication::setWindowIcon(ses::ui::appIcon());
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("ses — local-first audio workstation (UI-first slice)"));

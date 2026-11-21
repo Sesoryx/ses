@@ -22,4 +22,9 @@ private:
 
 QIcon sesIcon(const QString& name);
 
+// The app icon (assets/icon.svg, embedded in assets.qrc). Used for the window
+// icon and the desktop entry — without it the shell shows its generic
+// placeholder (DESIGN §12).
+QIcon appIcon();
+
 } // namespace ses::ui

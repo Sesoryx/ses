@@ -111,4 +111,9 @@ QIcon sesIcon(const QString& name)
     return QIcon(new TintedIconEngine(name));
 }
 
+QIcon appIcon()
+{
+    return QIcon(QStringLiteral(":/icon.svg"));
+}
+
 } // namespace ses::ui

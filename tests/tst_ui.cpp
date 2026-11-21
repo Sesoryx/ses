@@ -12,6 +12,7 @@
 #include "ui/timeline/TimelineWidget.h"
 
 #include <QApplication>
+#include <QFile>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QPalette>
@@ -178,6 +179,25 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(updates >= 3, 2000); // several 30 Hz ticks
         QVERIFY(transport.playing());
         transport.stop();
+    }
+
+    void appIconIsEmbeddedAndRenders()
+    {
+        // The WM shows its generic placeholder when this resource is missing or
+        // the SVG engine can't render it (regression guard for the app icon).
+        QVERIFY(QFile::exists(QStringLiteral(":/icon.svg")));
+        const QIcon icon = ses::ui::appIcon();
+        QVERIFY(!icon.isNull());
+        const QImage img = icon.pixmap(QSize(64, 64)).toImage();
+        QVERIFY(!img.isNull());
+        bool anyVisible = false;
+        for (int y = 0; y < img.height() && !anyVisible; ++y)
+            for (int x = 0; x < img.width(); ++x)
+                if (qAlpha(img.pixel(x, y)) > 0) {
+                    anyVisible = true;
+                    break;
+                }
+        QVERIFY(anyVisible); // real pixels, not a blank placeholder
     }
 
     void smokeJourney()

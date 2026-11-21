@@ -1,4 +1,8 @@
 <RCC>
+  <qresource prefix="/">
+    <!-- App icon (window/taskbar/desktop entry) — DESIGN §12. -->
+    <file alias="icon.svg">icon.svg</file>
+  </qresource>
   <qresource prefix="/theme">
     <file alias="tokens.dark.json">theme/tokens.dark.json</file>
     <file alias="tokens.light.json">theme/tokens.light.json</file>
