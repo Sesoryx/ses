@@ -83,6 +83,10 @@ if(SES_BUILD_TESTS)
   add_test(NAME core COMMAND tst_core)
   set_tests_properties(core PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+  add_executable(tst_engine tests/tst_engine.cpp)
+  target_link_libraries(tst_engine PRIVATE ses_engine Qt6::Test)
+  add_test(NAME engine COMMAND tst_engine)
+
   add_executable(tst_ui tests/tst_ui.cpp)
   target_link_libraries(tst_ui PRIVATE ses_ui Qt6::Test)
   add_test(NAME ui COMMAND tst_ui)
