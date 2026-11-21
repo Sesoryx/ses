@@ -67,6 +67,7 @@ QJsonObject Settings::toJson() const
 Settings Settings::fromJson(const QJsonObject& o)
 {
     Settings s;
+    s.schemaVersion = o.value(QStringLiteral("schemaVersion")).toInt(kSchemaVersion);
     const auto theme = o.value(QStringLiteral("theme")).toString();
     s.theme = (theme == "dark" || theme == "light") ? theme : QStringLiteral("system");
     s.snap = o.value(QStringLiteral("snap")).toBool(true);

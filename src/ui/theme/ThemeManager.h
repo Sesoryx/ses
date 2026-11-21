@@ -44,6 +44,7 @@ private:
     Mode mode_ = System;
     bool resolvedDark_ = true;
     bool applied_ = false;
+    bool styleSheetApplied_ = false;
     int generation_ = 0;
     QHash<QString, QString> dark_, light_;
 };

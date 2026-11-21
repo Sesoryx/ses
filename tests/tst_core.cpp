@@ -201,6 +201,41 @@ private slots:
         QCOMPARE(tr.length, 1000);
     }
 
+    void trimUndoRestoresFades()
+    {
+        ProjectModel m;
+        MediaItem media;
+        media.id = QStringLiteral("m");
+        media.frames = 1000;
+        m.addMedia(media);
+        Track t;
+        t.id = QStringLiteral("t");
+        m.insertTrack(0, t);
+        Clip c;
+        c.id = QStringLiteral("c");
+        c.mediaId = QStringLiteral("m");
+        c.length = 800;
+        c.fadeIn = Fade{ 600, QStringLiteral("linear"), {} };
+        c.fadeOut = Fade{ 700, QStringLiteral("exp"), {} };
+        m.insertClip(QStringLiteral("t"), 0, c);
+
+        m.push(new TrimClipCommand(&m, QStringLiteral("c"), ClipTrim{ 0, 300, 0 }));
+        QCOMPARE(m.project().clipById(QStringLiteral("c"))->fadeIn.length, 300);
+        QCOMPARE(m.project().clipById(QStringLiteral("c"))->fadeOut.length, 300);
+        m.push(new TrimClipCommand(&m, QStringLiteral("c"), ClipTrim{ 0, 750, 0 }));
+        QCOMPARE(m.undoStack().count(), 1);
+        QCOMPARE(m.project().clipById(QStringLiteral("c"))->fadeIn.length, 600);
+        QCOMPARE(m.project().clipById(QStringLiteral("c"))->fadeOut.length, 700);
+
+        m.undoStack().undo();
+        QCOMPARE(m.project().clipById(QStringLiteral("c"))->fadeIn.length, 600);
+        QCOMPARE(m.project().clipById(QStringLiteral("c"))->fadeOut.length, 700);
+
+        m.undoStack().redo();
+        QCOMPARE(m.project().clipById(QStringLiteral("c"))->fadeIn.length, 600);
+        QCOMPARE(m.project().clipById(QStringLiteral("c"))->fadeOut.length, 700);
+    }
+
     void undoRedoExact()
     {
         ProjectModel m;
@@ -230,6 +265,29 @@ private slots:
         while (m.undoStack().canRedo())
             m.undoStack().redo();
         QCOMPARE(m.project().toJson(), final);
+    }
+
+    void removeCommandsIgnoreDuplicateAndMissingIds()
+    {
+        ProjectModel m;
+        Track track;
+        track.id = QStringLiteral("t");
+        m.insertTrack(0, track);
+        Clip clip;
+        clip.id = QStringLiteral("c");
+        clip.length = 100;
+        m.insertClip(track.id, 0, clip);
+
+        m.push(new RemoveClipsCommand(&m, { QStringLiteral("c"), QStringLiteral("c") }));
+        QCOMPARE(m.project().clipCount(), 0);
+        m.undoStack().undo();
+        QCOMPARE(m.project().clipCount(), 1);
+
+        m.push(new RemoveTrackCommand(&m, QStringLiteral("missing")));
+        QCOMPARE(m.project().tracks.size(), 1);
+        m.undoStack().undo();
+        QCOMPARE(m.project().tracks.size(), 1);
+        QCOMPARE(m.project().tracks.first().id, QStringLiteral("t"));
     }
 
     void dragCoalescing()
@@ -330,6 +388,14 @@ private slots:
         f.write(QJsonDocument(o).toJson());
         f.close();
         QCOMPARE(Settings::load().toJson().value(QStringLiteral("futureSetting")).toInt(), 7);
+
+        o.insert(QStringLiteral("schemaVersion"), Settings::kSchemaVersion + 1);
+        QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        f.write(QJsonDocument(o).toJson());
+        f.close();
+        const Settings newer = Settings::load();
+        QCOMPARE(newer.schemaVersion, Settings::kSchemaVersion + 1);
+        QCOMPARE(newer.toJson().value(QStringLiteral("schemaVersion")).toInt(), Settings::kSchemaVersion + 1);
     }
 
     void wavProbeAndPeaks()
@@ -338,6 +404,9 @@ private slots:
         QVERIFY(dir.isValid());
         const QString path = dir.path() + QStringLiteral("/tone.wav");
         QVERIFY(writeTestWav(path, 1.0, 48000, 2));
+        QVERIFY(!writeTestWav(dir.path() + QStringLiteral("/invalid.wav"),
+                              std::numeric_limits<double>::quiet_NaN(), 48000, 2));
+        QVERIFY(!writeTestWav(dir.path() + QStringLiteral("/invalid.wav"), 1.0, 48000, 3));
         const MediaInfo info = probeWav(path);
         QVERIFY2(info.ok, qPrintable(info.error));
         QCOMPARE(info.sampleRate, 48000);
@@ -362,6 +431,52 @@ private slots:
         bad.write("not a riff file at all");
         bad.close();
         QVERIFY(!probeWav(bad.fileName()).ok);
+
+        // Reject a truncated chunk rather than accepting its declared format.
+        QFile truncated(dir.path() + QStringLiteral("/truncated.wav"));
+        QVERIFY(truncated.open(QIODevice::WriteOnly));
+        truncated.write("RIFF", 4);
+        const auto write32 = [](QFile& file, uint32_t value) {
+            char bytes[4];
+            qToLittleEndian(value, bytes);
+            file.write(bytes, 4);
+        };
+        write32(truncated, 0);
+        truncated.write("WAVEdata", 8);
+        write32(truncated, 64); // Declares 64 bytes, but no payload follows.
+        truncated.close();
+        const MediaInfo malformed = probeWav(truncated.fileName());
+        QVERIFY(!malformed.ok);
+
+        // A float WAV cannot claim more frames than its data chunk contains.
+        QFile badFact(dir.path() + QStringLiteral("/bad-fact.wav"));
+        QVERIFY(badFact.open(QIODevice::WriteOnly));
+        badFact.write("RIFF", 4);
+        write32(badFact, 0); // patched below with full RIFF size
+        badFact.write("WAVEfmt ", 8);
+        write32(badFact, 16);
+        char fmt[16] = {};
+        qToLittleEndian(uint16_t(3), fmt);
+        qToLittleEndian(uint16_t(1), fmt + 2);
+        qToLittleEndian(uint32_t(48000), fmt + 4);
+        qToLittleEndian(uint32_t(192000), fmt + 8);
+        qToLittleEndian(uint16_t(4), fmt + 12);
+        qToLittleEndian(uint16_t(32), fmt + 14);
+        badFact.write(fmt, sizeof(fmt));
+        badFact.write("fact", 4);
+        write32(badFact, 4);
+        write32(badFact, 10);
+        badFact.write("data", 4);
+        write32(badFact, 4);
+        write32(badFact, 0);
+        badFact.seek(4);
+        char riffSize[4];
+        qToLittleEndian(uint32_t(badFact.size() - 8), riffSize);
+        badFact.write(riffSize, 4);
+        badFact.close();
+        const MediaInfo invalidFrames = probeWav(badFact.fileName());
+        QVERIFY(!invalidFrames.ok);
+        QVERIFY(invalidFrames.error.contains(QStringLiteral("frame count")));
     }
 };
 

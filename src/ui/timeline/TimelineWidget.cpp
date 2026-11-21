@@ -223,7 +223,6 @@ void TimelineWidget::paintEvent(QPaintEvent*)
 
     // Lane backgrounds + grid (under clips).
     const double step = niceStepSec();
-    const int64_t rate = proj.sampleRate;
     const double startSec = horizontalScrollBar()->value() / pxPerSec_;
     for (int i = 0; i < proj.tracks.size(); ++i) {
         const int y = laneTop(i);
@@ -645,9 +644,10 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* ev)
     case Drag::TrimLeft: {
         const ClipTrim o = origTrims_.value(dragClip_);
         const int64_t end = o.timelineStart + o.length;
-        int64_t ns = std::clamp<int64_t>(o.timelineStart + delta, o.timelineStart - o.sourceOffset, end - 1);
+        const int64_t minStart = std::max<int64_t>(0, o.timelineStart - o.sourceOffset);
+        int64_t ns = std::clamp<int64_t>(o.timelineStart + delta, minStart, end - 1);
         if (snap_ && !noSnap)
-            ns = std::clamp<int64_t>(snapSample(ns, dragClip_), o.timelineStart - o.sourceOffset, end - 1);
+            ns = std::clamp<int64_t>(snapSample(ns, dragClip_), minStart, end - 1);
         preview_.insert(dragClip_, ClipTrim{ o.sourceOffset + (ns - o.timelineStart), end - ns, ns });
         viewport()->update();
         break;
@@ -681,7 +681,7 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* ev)
         const bool in = drag_ == Drag::FadeIn;
         const int64_t nl = std::clamp<int64_t>(origFade_.length + (in ? delta : -delta), 0, origTrims_.value(dragClip_).length);
         previewFades_.insert(dragClip_ + (in ? QStringLiteral("|in") : QStringLiteral("|out")),
-                             core::Fade{ nl, origFade_.curve });
+                             core::Fade{ nl, origFade_.curve, {} });
         viewport()->update();
         break;
     }

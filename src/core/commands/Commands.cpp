@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <utility>
+#include <QSet>
 
 namespace ses::core {
 
@@ -29,19 +30,23 @@ RemoveTrackCommand::RemoveTrackCommand(ProjectModel* m, QString trackId)
     : m_(m), id_(std::move(trackId))
 {
     index_ = m_->trackIndex(id_);
-    if (const Track* t = m_->project().trackById(id_))
+    if (const Track* t = m_->project().trackById(id_)) {
         track_ = *t;
+        valid_ = true;
+    }
     setText(QObject::tr("Remove track"));
 }
 
 void RemoveTrackCommand::redo()
 {
-    m_->removeTrack(id_);
+    if (valid_)
+        m_->removeTrack(id_);
 }
 
 void RemoveTrackCommand::undo()
 {
-    m_->insertTrack(index_, track_);
+    if (valid_)
+        m_->insertTrack(index_, track_);
 }
 
 // ---- clips ------------------------------------------------------------------
@@ -67,7 +72,11 @@ void AddClipCommand::undo()
 RemoveClipsCommand::RemoveClipsCommand(ProjectModel* m, QStringList clipIds)
     : m_(m)
 {
+    QSet<QString> seen;
     for (const auto& id : clipIds) {
+        if (seen.contains(id))
+            continue;
+        seen.insert(id);
         const Track* t = nullptr;
         const Clip* c = m_->project().clipById(id, &t);
         if (c && t)
@@ -136,6 +145,9 @@ TrimClipCommand::TrimClipCommand(ProjectModel* m, QString clipId, ClipTrim after
     : m_(m), clipId_(std::move(clipId)), after_(after)
 {
     before_ = m_->clipTrim(clipId_);
+    const Clip clip = m_->clipCopy(clipId_);
+    beforeFadeIn_ = clip.fadeIn;
+    beforeFadeOut_ = clip.fadeOut;
     setText(QObject::tr("Trim clip"));
 }
 
@@ -147,17 +159,24 @@ bool TrimClipCommand::mergeWith(const QUndoCommand* other)
     if (o->clipId_ != clipId_)
         return false;
     after_ = o->after_;
+    m_->setClipFade(clipId_, true, beforeFadeIn_);
+    m_->setClipFade(clipId_, false, beforeFadeOut_);
+    m_->setClipTrim(clipId_, after_);
     return true;
 }
 
 void TrimClipCommand::redo()
 {
+    m_->setClipFade(clipId_, true, beforeFadeIn_);
+    m_->setClipFade(clipId_, false, beforeFadeOut_);
     m_->setClipTrim(clipId_, after_);
 }
 
 void TrimClipCommand::undo()
 {
     m_->setClipTrim(clipId_, before_);
+    m_->setClipFade(clipId_, true, beforeFadeIn_);
+    m_->setClipFade(clipId_, false, beforeFadeOut_);
 }
 
 SetClipGainCommand::SetClipGainCommand(ProjectModel* m, QString clipId, double gain)
@@ -232,6 +251,7 @@ SplitClipsCommand::SplitClipsCommand(ProjectModel* m, QString clipId, int64_t s,
 
     left_ = original_;
     left_.length = s - original_.timelineStart;
+    left_.fadeIn.length = std::min(left_.fadeIn.length, left_.length);
     left_.fadeOut.length = std::min(left_.fadeOut.length, left_.length);
 
     right_ = original_;
@@ -240,6 +260,7 @@ SplitClipsCommand::SplitClipsCommand(ProjectModel* m, QString clipId, int64_t s,
     right_.sourceOffset = original_.sourceOffset + (s - original_.timelineStart);
     right_.length = original_.length - (s - original_.timelineStart);
     right_.fadeIn.length = std::min(right_.fadeIn.length, right_.length);
+    right_.fadeOut.length = std::min(right_.fadeOut.length, right_.length);
 
     valid_ = true;
     setText(QObject::tr("Split clip"));

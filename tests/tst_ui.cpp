@@ -34,13 +34,13 @@ private slots:
         ThemeManager* tm = ThemeManager::instance();
         w.applyThemeMode(QStringLiteral("dark"));
         const QString darkBg = tm->color(QStringLiteral("bg")).name();
-        QVERIFY(qApp->styleSheet().contains(darkBg));
+        QVERIFY(qApp->styleSheet().contains(QStringLiteral("palette(window)")));
         QCOMPARE(qApp->palette().color(QPalette::Window).name(), darkBg);
         QVERIFY(tm->isDark());
 
         w.applyThemeMode(QStringLiteral("light"));
         const QString lightBg = tm->color(QStringLiteral("bg")).name();
-        QVERIFY(qApp->styleSheet().contains(lightBg));
+        QVERIFY(qApp->styleSheet().contains(QStringLiteral("palette(window)")));
         QCOMPARE(qApp->palette().color(QPalette::Window).name(), lightBg);
         QVERIFY(!tm->isDark());
         QCOMPARE(ses::core::Settings::load().theme, QStringLiteral("light"));

@@ -1,12 +1,10 @@
 #include "ui/theme/ThemeManager.h"
 
 #include <QApplication>
-#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPalette>
-#include <QRegularExpression>
 #include <QStyleHints>
 #include <QWidget>
 
@@ -99,40 +97,36 @@ void ThemeManager::apply()
     std::sort(keys.begin(), keys.end(), [](const QString& a, const QString& b) {
         return a.size() > b.size();
     });
+    static const QHash<QString, QString> paletteRoles = {
+        { QStringLiteral("bg"), QStringLiteral("palette(window)") },
+        { QStringLiteral("bgAlt"), QStringLiteral("palette(alternatebase)") },
+        { QStringLiteral("panel"), QStringLiteral("palette(base)") },
+        { QStringLiteral("panelAlt"), QStringLiteral("palette(midlight)") },
+        { QStringLiteral("border"), QStringLiteral("palette(mid)") },
+        { QStringLiteral("text"), QStringLiteral("palette(windowtext)") },
+        { QStringLiteral("textSecondary"), QStringLiteral("palette(placeholdertext)") },
+        { QStringLiteral("accent"), QStringLiteral("palette(highlight)") },
+        { QStringLiteral("accentHover"), QStringLiteral("palette(link)") },
+        { QStringLiteral("accentText"), QStringLiteral("palette(highlightedtext)") },
+        { QStringLiteral("danger"), QStringLiteral("palette(brighttext)") },
+        { QStringLiteral("warning"), QStringLiteral("palette(linkvisited)") },
+        { QStringLiteral("ok"), QStringLiteral("palette(light)") },
+        { QStringLiteral("waveform"), QStringLiteral("palette(dark)") },
+        { QStringLiteral("waveformPeak"), QStringLiteral("palette(shadow)") },
+        { QStringLiteral("clipFill"), QStringLiteral("palette(button)") },
+        { QStringLiteral("clipFillAlt"), QStringLiteral("palette(tooltipbase)") },
+        { QStringLiteral("automation"), QStringLiteral("palette(tooltiptext)") },
+        { QStringLiteral("selection"), QStringLiteral("palette(highlight)") },
+        { QStringLiteral("playhead"), QStringLiteral("palette(brighttext)") },
+        { QStringLiteral("ruler"), QStringLiteral("palette(buttontext)") },
+        { QStringLiteral("grid"), QStringLiteral("palette(alternatebase)") },
+    };
     for (const auto& k : keys)
-        qss.replace(QLatin1Char('@') + k, tokens.value(k));
-    QElapsedTimer stage;
-    stage.start();
-    if (qApp)
+        qss.replace(QLatin1Char('@') + k, paletteRoles.value(k, tokens.value(k)));
+    if (qApp && !styleSheetApplied_) {
         qApp->setStyleSheet(qss);
-    qInfo("theme apply: setStyleSheet=%lldms", stage.elapsed());
-    // TEMP PROBE: isolate propagation vs rule-matching cost.
-    stage.restart();
-    qApp->setStyleSheet(QStringLiteral("QWidget { background: %1; color: %2; }").arg(tokens.value("bg"), tokens.value("text")));
-    qInfo("theme probe: trivial setStyleSheet=%lldms", stage.elapsed());
-    stage.restart();
-    QString noFonts = qss;
-    noFonts.remove(QRegularExpression(QStringLiteral("font-[^;]+;")));
-    qApp->setStyleSheet(noFonts);
-    qInfo("theme probe: no-font rules=%lldms", stage.elapsed());
-    stage.restart();
-    qApp->setStyleSheet(qss);
-    qInfo("theme probe: full re-apply=%lldms", stage.elapsed());
-    // TEMP PROBE: widget count + empty-window baseline.
-    qInfo("theme probe: widget count=%d", qApp->allWidgets().size());
-    stage.restart();
-    const auto tops = qApp->topLevelWidgets();
-    for (QWidget* t : tops)
-        t->setUpdatesEnabled(false);
-    qApp->setStyleSheet(QStringLiteral("QWidget { background: #123456; }"));
-    for (QWidget* t : tops) {
-        t->setUpdatesEnabled(true);
-        t->update();
+        styleSheetApplied_ = true;
     }
-    qInfo("theme probe: updates-disabled trivial=%lldms", stage.elapsed());
-    stage.restart();
-    qApp->setStyleSheet(qss);
-    qInfo("theme probe: final full=%lldms", stage.elapsed());
 
     // QPalette for native dialogs / fallback. Secondary text uses the
     // contrast-checked textSecondary role — never QPalette::Mid.
@@ -146,28 +140,30 @@ void ThemeManager::apply()
         pal.setColor(QPalette::Window, bg);
         pal.setColor(QPalette::WindowText, text);
         pal.setColor(QPalette::Base, panel);
-        pal.setColor(QPalette::AlternateBase, color(QStringLiteral("panelAlt")));
+        pal.setColor(QPalette::AlternateBase, color(QStringLiteral("bgAlt")));
         pal.setColor(QPalette::Text, text);
-        pal.setColor(QPalette::Button, color(QStringLiteral("bgAlt")));
-        pal.setColor(QPalette::ButtonText, text);
-        pal.setColor(QPalette::BrightText, text);
+        pal.setColor(QPalette::Button, color(QStringLiteral("clipFill")));
+        pal.setColor(QPalette::ButtonText, color(QStringLiteral("ruler")));
+        pal.setColor(QPalette::BrightText, color(QStringLiteral("danger")));
+        pal.setColor(QPalette::Light, color(QStringLiteral("ok")));
+        pal.setColor(QPalette::Midlight, color(QStringLiteral("panelAlt")));
+        pal.setColor(QPalette::Dark, color(QStringLiteral("waveform")));
+        pal.setColor(QPalette::Mid, color(QStringLiteral("border")));
+        pal.setColor(QPalette::Shadow, color(QStringLiteral("waveformPeak")));
         pal.setColor(QPalette::Highlight, accent);
         pal.setColor(QPalette::HighlightedText, color(QStringLiteral("accentText")));
-        pal.setColor(QPalette::ToolTipBase, panel);
-        pal.setColor(QPalette::ToolTipText, text);
+        pal.setColor(QPalette::ToolTipBase, color(QStringLiteral("clipFillAlt")));
+        pal.setColor(QPalette::ToolTipText, color(QStringLiteral("automation")));
         pal.setColor(QPalette::PlaceholderText, secondary);
         pal.setColor(QPalette::Link, accent);
+        pal.setColor(QPalette::LinkVisited, color(QStringLiteral("warning")));
         pal.setColor(QPalette::Disabled, QPalette::Text, secondary);
         pal.setColor(QPalette::Disabled, QPalette::ButtonText, secondary);
         pal.setColor(QPalette::Disabled, QPalette::WindowText, secondary);
-        stage.restart();
         qApp->setPalette(pal);
-        qInfo("theme apply: setPalette=%lldms", stage.elapsed());
     }
 
-    stage.restart();
     emit themeChanged();
-    qInfo("theme apply: themeChanged=%lldms", stage.elapsed());
 }
 
 QColor ThemeManager::color(const QString& key) const

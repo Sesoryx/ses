@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace ses::core {
 
@@ -27,25 +28,39 @@ public:
         if (f.read(header, 12) != 12 || std::memcmp(header, "RIFF", 4) != 0
             || std::memcmp(header + 8, "WAVE", 4) != 0)
             return;
+        const int64_t riffSize = qFromLittleEndian<uint32_t>(header + 4);
+        const int64_t riffEnd = 8 + riffSize;
+        if (riffSize < 4 || riffEnd > f.size())
+            return;
         valid_ = true;
         pos_ = 12;
-        fileSize_ = f.size();
+        fileSize_ = riffEnd;
     }
     bool valid() const { return valid_; }
 
     bool next(Chunk& c)
     {
-        if (!valid_ || pos_ + 8 > fileSize_)
+        if (!valid_ || pos_ == fileSize_)
             return false;
-        f_.seek(pos_);
+        if (fileSize_ - pos_ < 8 || !f_.seek(pos_)) {
+            valid_ = false;
+            return false;
+        }
         char hdr[8];
-        if (f_.read(hdr, 8) != 8)
+        if (f_.read(hdr, 8) != 8) {
+            valid_ = false;
             return false;
+        }
         std::memcpy(c.id, hdr, 4);
         c.id[4] = 0;
         c.size = qFromLittleEndian<uint32_t>(hdr + 4);
         c.dataPos = pos_ + 8;
-        pos_ = c.dataPos + c.size + (c.size & 1); // chunks are word-aligned
+        const int64_t paddedSize = int64_t(c.size) + (c.size & 1);
+        if (paddedSize > fileSize_ - c.dataPos) {
+            valid_ = false;
+            return false;
+        }
+        pos_ = c.dataPos + paddedSize; // chunks are word-aligned
         return true;
     }
 
@@ -154,6 +169,10 @@ MediaInfo probeWav(const QString& path)
                 factFrames = qFromLittleEndian<uint32_t>(reinterpret_cast<const uchar*>(b.constData()));
         }
     }
+    if (!riff.valid()) {
+        info.error = QStringLiteral("Malformed or truncated WAV chunk");
+        return info;
+    }
     if (!haveFmt || dataSize < 0) {
         info.error = QStringLiteral("Missing fmt/data chunk");
         return info;
@@ -167,13 +186,31 @@ MediaInfo probeWav(const QString& path)
         info.error = QStringLiteral("Unsupported bit depth %1").arg(fmt.bits);
         return info;
     }
+    if ((fmt.format == 1 && fmt.bits == 64) || (fmt.format == 3 && fmt.bits == 8)) {
+        info.error = QStringLiteral("Unsupported WAV encoding and bit-depth combination");
+        return info;
+    }
+    const int bytesPerSample = fmt.bits / 8;
+    if (fmt.blockAlign != fmt.channels * bytesPerSample) {
+        info.error = QStringLiteral("Invalid WAV block alignment");
+        return info;
+    }
+    if (dataSize % fmt.blockAlign != 0) {
+        info.error = QStringLiteral("WAV data size is not frame-aligned");
+        return info;
+    }
+    const int64_t dataFrames = dataSize / fmt.blockAlign;
+    if (factFrames > dataFrames) {
+        info.error = QStringLiteral("WAV frame count exceeds available audio data");
+        return info;
+    }
     info.ok = true;
     info.format = QStringLiteral("wav");
     info.sampleRate = int(fmt.sampleRate);
     info.channels = fmt.channels;
     info.bitsPerSample = fmt.bits;
     info.isFloat = fmt.format == 3;
-    info.frames = factFrames >= 0 ? factFrames : dataSize / fmt.blockAlign;
+    info.frames = factFrames >= 0 ? factFrames : dataFrames;
     return info;
 }
 
@@ -199,7 +236,7 @@ Peaks computeWavPeaks(const QString& path, int buckets)
             dataSize = c.size;
         }
     }
-    if (dataPos < 0 || fmt.blockAlign == 0)
+    if (!riff.valid() || dataPos < 0 || fmt.blockAlign == 0)
         return peaks;
 
     const int64_t frames = std::min<int64_t>(info.frames, dataSize / fmt.blockAlign);
@@ -210,15 +247,15 @@ Peaks computeWavPeaks(const QString& path, int buckets)
     peaks.samplesPerBucket = perBucket;
 
     f.seek(dataPos);
-    const int64_t chunkFrames = 4096;
+    const int64_t chunkFrames = std::max<int64_t>(1, (1024 * 1024) / fmt.blockAlign);
     QByteArray buf;
     buf.resize(int(chunkFrames * fmt.blockAlign));
     int64_t frame = 0;
     while (frame < frames) {
         const int64_t want = std::min(chunkFrames, frames - frame);
         const qint64 got = f.read(buf.data(), want * fmt.blockAlign);
-        if (got <= 0)
-            break;
+        if (got <= 0 || got % fmt.blockAlign != 0)
+            return {};
         const int64_t gotFrames = got / fmt.blockAlign;
         for (int64_t i = 0; i < gotFrames; ++i) {
             const int64_t abs = frame + i;
@@ -239,18 +276,30 @@ Peaks computeWavPeaks(const QString& path, int buckets)
         }
         frame += gotFrames;
     }
+    if (frame != frames)
+        return {};
     return peaks;
 }
 
 bool writeTestWav(const QString& path, double seconds, int sampleRate, int channels)
 {
+    if (!std::isfinite(seconds) || seconds <= 0.0 || sampleRate <= 0
+        || channels <= 0 || channels > 2)
+        return false;
+    const long double requestedFrames = static_cast<long double>(seconds) * sampleRate;
+    const uint16_t bits = 16;
+    const uint16_t blockAlign = uint16_t(channels * bits / 8);
+    const uint64_t maxDataSize = std::numeric_limits<uint32_t>::max() - 36;
+    if (requestedFrames < 1.0L
+        || uint64_t(sampleRate) > std::numeric_limits<uint32_t>::max() / blockAlign
+        || requestedFrames > static_cast<long double>(maxDataSize / blockAlign))
+        return false;
+    const int64_t frames = int64_t(requestedFrames);
+    const uint32_t dataSize = uint32_t(frames * blockAlign);
+
     QFile f(path);
     if (!f.open(QIODevice::WriteOnly))
         return false;
-    const int64_t frames = int64_t(seconds * sampleRate);
-    const uint16_t bits = 16;
-    const uint16_t blockAlign = uint16_t(channels * bits / 8);
-    const uint32_t dataSize = uint32_t(frames * blockAlign);
 
     auto put16 = [&f](uint16_t v) {
         char b[2];

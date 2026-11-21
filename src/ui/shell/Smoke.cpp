@@ -54,14 +54,18 @@ SmokeResult runSmoke(MainWindow& w)
     qApp->processEvents();
     const qint64 lightMs = timer.elapsed();
     const QString lightBg = ThemeManager::instance()->color(QStringLiteral("bg")).name();
-    check(qApp->styleSheet().contains(lightBg), "light theme stylesheet applied");
+    check(qApp->styleSheet().contains(QStringLiteral("palette(window)"))
+              && qApp->palette().color(QPalette::Window).name() == lightBg,
+          "light theme palette and stylesheet applied");
     timer.restart();
     w.applyThemeMode(QStringLiteral("dark"));
     const qint64 darkApplyMs = timer.elapsed();
     qApp->processEvents();
     const qint64 darkMs = timer.elapsed();
     const QString darkBg = ThemeManager::instance()->color(QStringLiteral("bg")).name();
-    check(qApp->styleSheet().contains(darkBg), "dark theme stylesheet applied");
+    check(qApp->styleSheet().contains(QStringLiteral("palette(window)"))
+              && qApp->palette().color(QPalette::Window).name() == darkBg,
+          "dark theme palette and stylesheet applied");
     qInfo("theme timing: light apply=%lldms total=%lldms | dark apply=%lldms total=%lldms",
           lightApplyMs, lightMs, darkApplyMs, darkMs);
     check(lightMs < 100 && darkMs < 100, QStringLiteral("theme toggle < 100 ms (light %1 ms, dark %2 ms)").arg(lightMs).arg(darkMs));

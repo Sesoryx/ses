@@ -33,6 +33,7 @@ private:
     QString id_;
     Track track_;
     int index_ = 0;
+    bool valid_ = false;
 };
 
 class AddClipCommand : public QUndoCommand {
@@ -91,6 +92,7 @@ private:
     ProjectModel* m_;
     QString clipId_;
     ClipTrim before_, after_;
+    Fade beforeFadeIn_, beforeFadeOut_;
 };
 
 class SetClipGainCommand : public QUndoCommand {

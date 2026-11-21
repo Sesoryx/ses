@@ -24,7 +24,6 @@
 #include <QCryptographicHash>
 #include <QDragEnterEvent>
 #include <QDropEvent>
-#include <QElapsedTimer>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFrame>
@@ -748,13 +747,8 @@ void MainWindow::toggleTheme()
 void MainWindow::applyThemeMode(const QString& mode)
 {
     settings_.theme = mode;
-    QElapsedTimer t;
-    t.start();
     settings_.save();
-    qInfo("applyThemeMode: save=%lldms", t.elapsed());
-    t.restart();
     ThemeManager::instance()->setMode(ThemeManager::modeFromString(mode));
-    qInfo("applyThemeMode: setMode=%lldms", t.elapsed());
 }
 
 // ---- events ---------------------------------------------------------------------------
