@@ -1,5 +1,6 @@
 #include "core/media/MediaProbe.h"
 #include "engine/Engine.h"
+#include "engine/dsp/Resampler.h"
 #include "engine/io/AudioDevice.h"
 #include "engine/io/Decode.h"
 #include "engine/BlockMixer.h"
@@ -24,14 +25,14 @@ using namespace ses::engine;
 
 namespace {
 
-// Sine fixture as OGG/Vorbis at an arbitrary rate. Returns false when this
-// libsndfile build lacks the Vorbis encoder — tests then skip honestly.
-bool writeTestOgg(const QString& path, double seconds, int sampleRate)
+// Sine fixture in a caller-chosen container (OGG/Vorbis, WAV, …). Returns
+// false when this libsndfile build lacks the encoder — tests then skip honestly.
+bool writeSineFile(const QString& path, double seconds, int sampleRate, int format)
 {
     SF_INFO info{};
     info.samplerate = sampleRate;
     info.channels = 2;
-    info.format = SF_FORMAT_OGG | SF_FORMAT_VORBIS;
+    info.format = format;
     SNDFILE* file = sf_open(path.toUtf8().constData(), SFM_WRITE, &info);
     if (!file)
         return false;
@@ -49,6 +50,68 @@ bool writeTestOgg(const QString& path, double seconds, int sampleRate)
     }
     sf_close(file);
     return true;
+}
+
+bool writeTestOgg(const QString& path, double seconds, int sampleRate)
+{
+    return writeSineFile(path, seconds, sampleRate, SF_FORMAT_OGG | SF_FORMAT_VORBIS);
+}
+
+// seconds of 440 Hz stereo sine (0.5 amplitude) at sampleRate.
+std::vector<float> makeTone(int sampleRate, double seconds)
+{
+    const std::size_t frames = std::size_t(seconds * sampleRate);
+    std::vector<float> pcm(frames * 2);
+    for (std::size_t i = 0; i < frames; ++i) {
+        const float v = float(0.5 * std::sin(2.0 * M_PI * 440.0 * double(i) / sampleRate));
+        pcm[i * 2] = v;
+        pcm[i * 2 + 1] = v;
+    }
+    return pcm;
+}
+
+// Frequency from sign changes on channel 0 over the whole buffer.
+double toneHertz(const std::vector<float>& pcm, int sampleRate)
+{
+    const std::size_t frames = pcm.size() / 2;
+    if (frames < 2)
+        return 0.0;
+    int crossings = 0;
+    for (std::size_t i = 1; i < frames; ++i)
+        if ((pcm[(i - 1) * 2] < 0.0f) != (pcm[i * 2] < 0.0f))
+            ++crossings;
+    return crossings / 2.0 / (double(frames) / double(sampleRate));
+}
+
+// Converts a whole buffer through the streaming API (push + flush), mirroring
+// the offline import path. Empty result = the resampler got stuck.
+std::vector<float> convertAll(Resampler& rs, const std::vector<float>& in)
+{
+    std::vector<float> out;
+    std::vector<float> scratch(in.size() + 1024);
+    const std::size_t frames = in.size() / 2;
+    std::size_t done = 0;
+    while (done < frames) {
+        std::size_t consumed = 0;
+        const std::size_t made = rs.process(in.data() + done * 2, frames - done,
+                                            scratch.data(), scratch.size() / 2,
+                                            consumed);
+        out.insert(out.end(), scratch.begin(),
+                   scratch.begin() + std::ptrdiff_t(made * 2));
+        done += consumed;
+        if (consumed == 0 && made == 0)
+            return {};
+    }
+    for (int guard = 0; guard < 64; ++guard) {
+        std::size_t consumed = 0;
+        const std::size_t made = rs.process(nullptr, 0, scratch.data(),
+                                            scratch.size() / 2, consumed);
+        if (made == 0)
+            break;
+        out.insert(out.end(), scratch.begin(),
+                   scratch.begin() + std::ptrdiff_t(made * 2));
+    }
+    return out;
 }
 
 } // namespace
@@ -151,6 +214,7 @@ private slots:
         AudioDevice dev;
         QVERIFY(dev.openOnBackend(ma_backend_null, 48000, 256));
         QCOMPARE(dev.actualSampleRate(), 48000);
+        QVERIFY(!dev.masterSrcActive()); // matching rates — no SRC chain
         QVERIFY(dev.start());
         DeviceEvent event{};
         QVERIFY(dev.nextDeviceEvent(event));
@@ -319,6 +383,130 @@ private slots:
         QVERIFY(!engine.available());
     }
 
+    void resamplerPassesThroughWhenRatesMatch()
+    {
+        Resampler rs;
+        QVERIFY(rs.init(48000, 48000, 2, Resampler::Quality::Offline));
+        QVERIFY(!rs.active());
+        const std::vector<float> in = makeTone(48000, 0.01);
+        const std::vector<float> out = convertAll(rs, in);
+        QCOMPARE(out.size(), in.size());
+        for (std::size_t i = 0; i < in.size(); ++i)
+            QCOMPARE(out[i], in[i]); // exact — no soxr instance, zero latency
+    }
+
+    void resamplerKeepsPitchAcrossRates()
+    {
+        const int from[] = { 44100, 48000, 48000 };
+        const int to[] = { 48000, 44100, 22050 }; // import up, device-style down, TTS rate (§3.1)
+        for (int c = 0; c < 3; ++c) {
+            Resampler rs;
+            QVERIFY(rs.init(from[c], to[c], 2, Resampler::Quality::Offline));
+            QVERIFY(rs.active());
+            const std::vector<float> in = makeTone(from[c], 0.5);
+            const std::vector<float> out = convertAll(rs, in);
+            QVERIFY(!out.empty());
+
+            // 0.5 s of audio comes out as 0.5 s at the new rate (± flush tail).
+            const double frames = double(out.size() / 2);
+            const double expected = 0.5 * to[c];
+            QVERIFY2(std::abs(frames - expected) <= 16.0,
+                     qPrintable(QStringLiteral("%1→%2: %3 frames, expected %4")
+                                    .arg(from[c])
+                                    .arg(to[c])
+                                    .arg(frames)
+                                    .arg(expected)));
+
+            // The tone is still 440 Hz and its amplitude survives.
+            const double hz = toneHertz(out, to[c]);
+            QVERIFY2(std::abs(hz - 440.0) < 8.0,
+                     qPrintable(QStringLiteral("%1→%2: %3 Hz")
+                                    .arg(from[c])
+                                    .arg(to[c])
+                                    .arg(hz)));
+            float peak = 0.0f;
+            for (float v : out)
+                peak = std::max(peak, std::abs(v));
+            QVERIFY(peak > 0.4f);
+            QVERIFY(peak < 0.6f);
+        }
+    }
+
+    void resamplerResetDropsStaleTail()
+    {
+        Resampler rs;
+        QVERIFY(rs.init(44100, 48000, 2, Resampler::Quality::Realtime));
+        // Loud DC into a tiny output window: frames stay queued inside soxr.
+        const std::vector<float> dc(4410 * 2, 0.5f);
+        std::vector<float> small(200, 0.0f);
+        std::size_t consumed = 0;
+        rs.process(dc.data(), 4410, small.data(), 100, consumed);
+        rs.reset(); // the §3.3 seek behavior: the old tail must not stay audible
+
+        std::vector<float> tail(8192 * 2, 0.0f);
+        std::size_t flushed = 0;
+        for (int i = 0; i < 8 && flushed == 0; ++i) {
+            std::size_t eaten = 0;
+            flushed = rs.process(nullptr, 0, tail.data(), tail.size() / 2, eaten);
+        }
+        float peak = 0.0f;
+        for (std::size_t i = 0; i < flushed * 2; ++i)
+            peak = std::max(peak, std::abs(tail[i]));
+        QVERIFY2(peak < 0.05f,
+                 "reset must drop the queued tail — a stale DC tail would read 0.5");
+    }
+
+    void audioDeviceMasterSrcEngagesOnRateMismatch()
+    {
+        // Timeline at the 48 kHz project rate, device at 44.1 kHz: the master
+        // chain is mixer.render → soxr → device out (ROADMAP §3.3), and the
+        // playhead advances in project frames (~256 × 48000/44100 ≈ 280 per
+        // device block), not in device frames.
+        static const std::vector<float> source(48000 * 2 * 2, 0.5f); // 2 s of 0.5
+        AudioDevice dev;
+        QVERIFY(dev.openOnBackend(ma_backend_null, 48000, 256, 44100));
+        QCOMPARE(dev.actualSampleRate(), 44100);
+        QVERIFY(dev.masterSrcActive());
+        QVERIFY(dev.mixer().setClip(0, { source.data(), source.size() / 2, 0, 1.0f, 0.0f, false }));
+        QVERIFY(dev.start());
+        QVERIFY(dev.sendCommand({RtCommand::Play}));
+
+        std::vector<int64_t> heads;
+        float peak = 0.0f;
+        Telemetry t{};
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline && t.playhead < 48000) {
+            while (dev.nextTelemetry(t)) {
+                heads.push_back(t.playhead);
+                peak = std::max(peak, t.masterPeak);
+                if (t.playhead >= 48000)
+                    break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        QVERIFY(t.playhead >= 48000); // one second of project time elapsed
+        QVERIFY(peak > 0.4f);         // the resampled chain carries the clip
+        QCOMPARE(t.underruns, 0u);    // every device block was filled
+
+        // Median per-block advance across the run (dropped telemetry samples
+        // only produce multiples of the true delta and cannot skew the median).
+        std::vector<int64_t> deltas;
+        for (std::size_t i = 1; i < heads.size(); ++i)
+            if (heads[i] > heads[i - 1])
+                deltas.push_back(heads[i] - heads[i - 1]);
+        QVERIFY(deltas.size() >= 8);
+        std::nth_element(deltas.begin(), deltas.begin() + std::ptrdiff_t(deltas.size() / 2),
+                         deltas.end());
+        const int64_t median = deltas[deltas.size() / 2];
+        QVERIFY2(median >= 276 && median <= 284,
+                 qPrintable(QStringLiteral("median block advance %1 project frames — "
+                                           "expected ≈280 (device frames would read 256)")
+                                .arg(median)));
+
+        dev.stop();
+        dev.close();
+    }
+
     void blockMixerHandlesExtremeTimelineAndNonFiniteValues()
     {
         const float source[] = { 1.0f, std::numeric_limits<float>::quiet_NaN(),
@@ -423,6 +611,26 @@ private slots:
             peak = std::max(peak, std::abs(v));
         }
         QVERIFY(peak > 0.1f);
+        QVERIFY(out.peaks.valid());
+        // 44.1→48 kHz import keeps the pitch (soxr VHQ, §2.8).
+        QVERIFY(std::abs(toneHertz(out.pcm, 48000) - 440.0) < 8.0);
+    }
+
+    void decodeWavImportResamplesToProjectRate()
+    {
+        // 44.1 kHz WAV through the ma_decoder route: decoded at the native
+        // rate, imported through soxr VHQ (ROADMAP §2.8/§3.2).
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString wav = dir.path() + QStringLiteral("/tone44.wav");
+        QVERIFY(writeSineFile(wav, 0.5, 44100, SF_FORMAT_WAV | SF_FORMAT_PCM_16));
+
+        DecodedAudio out;
+        QVERIFY2(decodeFile(wav, out), qPrintable(out.error));
+        QCOMPARE(out.sampleRate, 48000);
+        QCOMPARE(out.channels, 2);
+        QVERIFY(std::abs(out.frames - 24000) <= 16); // 0.5 s at 48 kHz (± flush tail)
+        QVERIFY(std::abs(toneHertz(out.pcm, 48000) - 440.0) < 8.0);
         QVERIFY(out.peaks.valid());
     }
 

@@ -6,12 +6,14 @@
 
 #include "engine/BlockMixer.h"
 #include "engine/SpscRing.h"
+#include "engine/dsp/Resampler.h"
 #include "engine/io/DeviceTypes.h"
 
 #include <miniaudio.h>
 
 #include <atomic>
 #include <cstdint>
+#include <vector>
 
 namespace ses::engine {
 
@@ -20,12 +22,16 @@ class AudioDevice {
 public:
     ~AudioDevice() { close(); }
 
-    // Default output device. periodSizeInMilliseconds stays 0 (ROADMAP §2.10).
-    bool open(int sampleRate = 48000, ma_uint32 periodFrames = 256);
+    // Default output device at the project rate. periodSizeInMilliseconds
+    // stays 0 (ROADMAP §2.10). deviceRate (0 = request sampleRate) opens the
+    // device at a different rate than the project timeline — the master
+    // output is then resampled with soxr (§3.3).
+    bool open(int sampleRate = 48000, ma_uint32 periodFrames = 256,
+              int deviceRate = 0);
 
     // Explicit backend — e.g. ma_backend_null for headless tests (§2.5).
     bool openOnBackend(ma_backend backend, int sampleRate = 48000,
-                       ma_uint32 periodFrames = 256);
+                       ma_uint32 periodFrames = 256, int deviceRate = 0);
 
     void close();
     bool start();
@@ -35,6 +41,10 @@ public:
     bool started() const { return initialized_ && ma_device_is_started(&device_); }
     bool isOpen() const { return initialized_; }
     int64_t playhead() const { return playhead_.load(std::memory_order_relaxed); }
+
+    // True while the master output runs through the soxr chain because the
+    // device rate differs from the project rate (ROADMAP §3.3).
+    bool masterSrcActive() const { return src_.active(); }
 
     // GUI-thread drains:
     bool nextTelemetry(Telemetry& out) { return telemetry_.pop(out); }
@@ -47,11 +57,12 @@ public:
 
 private:
     bool init(const ma_backend* backends, ma_uint32 backendCount,
-              int sampleRate, ma_uint32 periodFrames);
+              int sampleRate, ma_uint32 periodFrames, int deviceRate);
 
     static void dataCallback(ma_device* dev, void* out, const void* in, ma_uint32 frames);
     static void notificationCallback(const ma_device_notification* n);
     void applyCommands(); // RT: drain the command ring at block boundaries
+    void renderThroughSrc(float* dst, std::size_t frames); // RT: mixer → soxr → out
 
     ma_device device_{};
     bool initialized_ = false;
@@ -65,6 +76,14 @@ private:
     bool loop_ = false;
     float abFader_ = 0.5f; // wired to the bus crossfade in P4
     uint32_t xruns_ = 0, underruns_ = 0;
+
+    // Master SRC (ROADMAP §3.3): project rate → device rate. Built in init()
+    // (off-RT); the callback only calls process()/reset(). The scratch and
+    // carry are RT-owned after open and never resized there.
+    Resampler src_;
+    std::vector<float> srcIn_;
+    std::size_t srcCarry_ = 0;
+    int projectRate_ = 48000;
 };
 
 } // namespace ses::engine

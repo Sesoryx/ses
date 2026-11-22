@@ -6,6 +6,8 @@
 
 #include "engine/io/Decode.h"
 
+#include "engine/dsp/Resampler.h"
+
 #include <miniaudio.h>
 #include <sndfile.h>
 
@@ -43,37 +45,116 @@ void decodeFoldPeaks(core::PeakBuilder& peaks, const float* interleaved, std::si
         peaks.pushFrame(interleaved[i * 2], interleaved[i * 2 + 1]);
 }
 
-// ma_decoder path (ROADMAP §2.7): wav/flac/mp3/vorbis built in, output
-// converted to f32 stereo at targetRate by the decoder's internal resampler.
+// Scratch for one decode chunk after import SRC: worst-case output frames
+// plus margin. Peak LODs are folded on the converted samples, matching the
+// project-rate arena bucket for bucket (§2.7).
+std::size_t convertScratchFrames(int nativeRate, int targetRate)
+{
+    const double ratio = double(targetRate) / double(nativeRate);
+    return std::size_t(std::ceil(double(kDecodeChunkFrames) * ratio)) + 256;
+}
+
+void appendConverted(DecodedAudio& out, core::PeakBuilder& peaks,
+                     const float* data, std::size_t frames)
+{
+    const std::size_t base = out.pcm.size();
+    out.pcm.resize(base + frames * 2);
+    std::copy_n(data, frames * 2, out.pcm.data() + base);
+    decodeFoldPeaks(peaks, out.pcm.data() + base, frames);
+}
+
+// Native-rate interleaved stereo chunk → soxr VHQ → out.pcm at the target
+// rate (ROADMAP §3.2: import quality). Partial consumes are looped until the
+// chunk is eaten. False when the resampler makes no progress.
+bool convertPush(Resampler& rs, const float* stereo, std::size_t frames,
+                 std::vector<float>& scratch, DecodedAudio& out,
+                 core::PeakBuilder& peaks)
+{
+    std::size_t done = 0;
+    int guard = 0;
+    while (done < frames && guard++ < 1024) {
+        std::size_t consumed = 0;
+        const std::size_t made = rs.process(stereo + done * 2, frames - done,
+                                            scratch.data(), scratch.size() / 2,
+                                            consumed);
+        if (made > 0)
+            appendConverted(out, peaks, scratch.data(), made);
+        done += consumed;
+        if (consumed == 0 && made == 0)
+            return false; // stuck — report honestly
+    }
+    return done == frames;
+}
+
+// Drains the queued tail after the last chunk (end of input, §3.2).
+bool convertFlush(Resampler& rs, std::vector<float>& scratch, DecodedAudio& out,
+                  core::PeakBuilder& peaks)
+{
+    for (int guard = 0; guard < 1024; ++guard) {
+        std::size_t consumed = 0;
+        const std::size_t made = rs.process(nullptr, 0, scratch.data(),
+                                            scratch.size() / 2, consumed);
+        if (made == 0)
+            return true;
+        appendConverted(out, peaks, scratch.data(), made);
+    }
+    return false; // the flush never drained — pathological
+}
+
+// ma_decoder path (ROADMAP §2.7): wav/flac/mp3/vorbis built in. Decoded at
+// the file's native rate; the import SRC to targetRate is soxr VHQ (§2.8 —
+// import quality matters), not the decoder's linear internal resampler.
 bool decodeViaMaDecoder(const QString& path, DecodedAudio& out, int targetRate,
                         core::PeakBuilder& peaks)
 {
-    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 2, ma_uint32(targetRate));
+    ma_decoder_config cfg = ma_decoder_config_init(ma_format_f32, 2, 0); // native rate
     ma_decoder decoder;
     const QByteArray utf8 = path.toUtf8();
     if (ma_decoder_init_file(utf8.constData(), &cfg, &decoder) != MA_SUCCESS) {
         out.error = QStringLiteral("unrecognized or corrupt audio (miniaudio decoder)");
         return false;
     }
+    const int nativeRate = static_cast<int>(decoder.outputSampleRate);
+    if (nativeRate <= 0) {
+        out.error = QStringLiteral("unknown source sample rate");
+        ma_decoder_uninit(&decoder);
+        return false;
+    }
+
+    Resampler rs;
+    if (!rs.init(nativeRate, targetRate, 2, Resampler::Quality::Offline)) {
+        out.error = QStringLiteral("cannot set up sample rate conversion");
+        ma_decoder_uninit(&decoder);
+        return false;
+    }
+    std::vector<float> scratch(convertScratchFrames(nativeRate, targetRate) * 2);
 
     ma_uint64 total = 0;
     ma_decoder_get_length_in_pcm_frames(&decoder, &total);
     // CAUTION: total comes back 0 for Vorbis (stb_vorbis push mode, §2.10) —
     // reserve when known, grow while reading otherwise.
-    if (total > 0)
-        out.pcm.reserve(static_cast<std::size_t>(total) * 2);
+    if (total > 0) {
+        out.pcm.reserve(static_cast<std::size_t>(
+                            std::ceil(double(total) * double(targetRate) / double(nativeRate)))
+                            * 2
+                        + 2);
+    }
 
     float buf[kDecodeChunkFrames * 2];
     ma_uint64 read = 0;
-    while (ma_decoder_read_pcm_frames(&decoder, buf, kDecodeChunkFrames, &read) == MA_SUCCESS
+    bool ok = true;
+    while (ok && ma_decoder_read_pcm_frames(&decoder, buf, kDecodeChunkFrames, &read) == MA_SUCCESS
            && read > 0) {
-        const std::size_t base = out.pcm.size();
-        out.pcm.resize(base + static_cast<std::size_t>(read) * 2);
         for (ma_uint64 i = 0; i < read * 2; ++i)
-            out.pcm[base + i] = decodeCleanSample(buf[i]);
-        decodeFoldPeaks(peaks, out.pcm.data() + base, static_cast<std::size_t>(read));
+            buf[i] = decodeCleanSample(buf[i]);
+        ok = convertPush(rs, buf, static_cast<std::size_t>(read), scratch, out, peaks);
     }
     ma_decoder_uninit(&decoder); // returns ma_result here (§2.10)
+
+    if (!ok || !convertFlush(rs, scratch, out, peaks)) {
+        out.error = QStringLiteral("sample rate conversion failed");
+        return false;
+    }
 
     out.sampleRate = targetRate;
     out.channels = 2;
@@ -86,9 +167,8 @@ bool decodeViaMaDecoder(const QString& path, DecodedAudio& out, int targetRate,
 }
 
 // libsndfile path (ROADMAP §4): native-rate interleaved f32 → stereo fold →
-// linear ma_resampler to targetRate (§2.8 "simple internal conversions";
-// task 6 swaps in soxr VHQ for import quality). sf_readf_float normalizes
-// every container into [-1,1] f32.
+// soxr VHQ to targetRate (§2.8 "media import" — import quality matters, not
+// speed; P1 task 6). sf_readf_float normalizes every container into [-1,1] f32.
 bool decodeViaSndfile(const QString& path, DecodedAudio& out, int targetRate,
                       core::PeakBuilder& peaks)
 {
@@ -105,29 +185,28 @@ bool decodeViaSndfile(const QString& path, DecodedAudio& out, int targetRate,
         return false;
     }
 
-    const bool resample = info.samplerate != targetRate;
-    ma_resampler resampler{};
-    if (resample) {
-        const ma_resampler_config rc = ma_resampler_config_init(
-            ma_format_f32, 2, ma_uint32(info.samplerate), ma_uint32(targetRate),
-            ma_resample_algorithm_linear);
-        if (ma_resampler_init(&rc, nullptr, &resampler) != MA_SUCCESS) {
-            out.error = QStringLiteral("cannot set up sample rate conversion");
-            sf_close(file);
-            return false;
-        }
+    Resampler rs;
+    if (!rs.init(info.samplerate, targetRate, 2, Resampler::Quality::Offline)) {
+        out.error = QStringLiteral("cannot set up sample rate conversion");
+        sf_close(file);
+        return false;
+    }
+    std::vector<float> scratch(convertScratchFrames(info.samplerate, targetRate) * 2);
+    if (info.frames > 0) {
+        out.pcm.reserve(static_cast<std::size_t>(
+                            std::ceil(double(info.frames) * double(targetRate)
+                                      / double(info.samplerate)))
+                            * 2
+                        + 2);
     }
 
     const int channels = info.channels;
     std::vector<float> in(static_cast<std::size_t>(kDecodeChunkFrames) * channels);
     std::vector<float> stereo(static_cast<std::size_t>(kDecodeChunkFrames) * 2);
-    std::vector<float> converted(
-        static_cast<std::size_t>(std::ceil(double(kDecodeChunkFrames)
-                                           * double(targetRate) / double(info.samplerate)))
-        + 256);
 
     sf_count_t got = 0;
-    while ((got = sf_readf_float(file, in.data(), kDecodeChunkFrames)) > 0) {
+    bool ok = true;
+    while (ok && (got = sf_readf_float(file, in.data(), kDecodeChunkFrames)) > 0) {
         // Fold to stereo: mono duplicates, multi-channel takes the front pair.
         for (sf_count_t i = 0; i < got; ++i) {
             const float left = channels == 1 ? in[static_cast<std::size_t>(i)]
@@ -137,42 +216,14 @@ bool decodeViaSndfile(const QString& path, DecodedAudio& out, int targetRate,
             stereo[static_cast<std::size_t>(i) * 2] = decodeCleanSample(left);
             stereo[static_cast<std::size_t>(i) * 2 + 1] = decodeCleanSample(right);
         }
-
-        std::size_t done = 0;
-        const std::size_t framesIn = static_cast<std::size_t>(got);
-        while (done < framesIn) {
-            const float* src = stereo.data() + done * 2;
-            ma_uint64 inFrames = ma_uint64(framesIn - done);
-            if (!resample) {
-                const std::size_t base = out.pcm.size();
-                out.pcm.resize(base + static_cast<std::size_t>(inFrames) * 2);
-                std::copy_n(src, static_cast<std::size_t>(inFrames) * 2, out.pcm.data() + base);
-                decodeFoldPeaks(peaks, out.pcm.data() + base, static_cast<std::size_t>(inFrames));
-                done = framesIn;
-                break;
-            }
-            ma_uint64 outFrames = ma_uint64(converted.size() / 2);
-            if (ma_resampler_process_pcm_frames(&resampler, src, &inFrames, converted.data(),
-                                               &outFrames)
-                != MA_SUCCESS) {
-                out.error = QStringLiteral("sample rate conversion failed");
-                ma_resampler_uninit(&resampler, nullptr);
-                sf_close(file);
-                return false;
-            }
-            const std::size_t base = out.pcm.size();
-            out.pcm.resize(base + static_cast<std::size_t>(outFrames) * 2);
-            std::copy_n(converted.data(), static_cast<std::size_t>(outFrames) * 2,
-                        out.pcm.data() + base);
-            decodeFoldPeaks(peaks, out.pcm.data() + base, static_cast<std::size_t>(outFrames));
-            if (inFrames == 0)
-                break; // no progress — do not spin
-            done += static_cast<std::size_t>(inFrames);
-        }
+        ok = convertPush(rs, stereo.data(), static_cast<std::size_t>(got), scratch, out, peaks);
     }
-    if (resample)
-        ma_resampler_uninit(&resampler, nullptr);
     sf_close(file);
+
+    if (!ok || !convertFlush(rs, scratch, out, peaks)) {
+        out.error = QStringLiteral("sample rate conversion failed");
+        return false;
+    }
 
     out.sampleRate = targetRate;
     out.channels = 2;
