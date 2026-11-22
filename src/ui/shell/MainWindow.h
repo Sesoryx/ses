@@ -3,9 +3,11 @@
 // bar, track headers + timeline, collapsible mixer, right dock (AI/History/
 // Models), quiet status bar. Widgets-only, styled entirely by QSS.
 
+#include "core/media/MediaCache.h"
 #include "core/model/ProjectModel.h"
 #include "core/persistence/Settings.h"
 #include "engine/Engine.h"
+#include "engine/io/Decode.h"
 
 #include <QMainWindow>
 
@@ -36,6 +38,8 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
 
     core::ProjectModel& model() { return model_; }
+    core::MediaCache& mediaCache() { return mediaCache_; }
+    engine::DecodePool& decodePool() { return decodePool_; }
     Transport* transport() const { return transport_; }
     TimelineWidget* timeline() const { return timeline_; }
     AbFader* abFader() const { return abFader_; }
@@ -75,6 +79,8 @@ private:
     core::Settings settings_;
     core::ProjectModel model_;
     engine::DeviceEngine engine_;
+    core::MediaCache mediaCache_; // decoded arenas (GUI-side, DESIGN §4.3)
+    engine::DecodePool decodePool_;
     Transport* transport_ = nullptr;
 
     TimelineWidget* timeline_ = nullptr;

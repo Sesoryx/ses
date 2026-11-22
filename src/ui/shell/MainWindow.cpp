@@ -74,6 +74,7 @@ QToolButton* toolButton(const QString& icon, const QString& tip, QWidget* parent
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
+    , decodePool_(&mediaCache_, model_.project().sampleRate)
 {
     setObjectName(QStringLiteral("MainWindow"));
     resize(1280, 800);
@@ -277,6 +278,7 @@ void MainWindow::buildEditor(QWidget* central)
     headers_ = new TrackHeaders(&model_, content);
     timeline_ = new TimelineWidget(&model_, transport_, content);
     timeline_->setSnap(settings_.snap);
+    timeline_->setMediaCache(&mediaCache_); // decoded peak LODs (P1 task 5)
     ch->addWidget(headers_);
     ch->addWidget(timeline_, 1);
     ev->addWidget(content, 1);
@@ -284,7 +286,7 @@ void MainWindow::buildEditor(QWidget* central)
     empty_ = new EmptyState(timeline_->viewport());
     connect(empty_, &EmptyState::importRequested, this, [this] {
         const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("Import audio"), QString(),
-                                                          QStringLiteral("WAV audio (*.wav);;All files (*)"));
+                                                          QStringLiteral("Audio (*.wav *.flac *.mp3 *.ogg *.oga);;All files (*)"));
         if (!path.isEmpty())
             importFiles({ path });
     });
@@ -346,7 +348,7 @@ void MainWindow::buildActions()
 
     make(QStringLiteral("Import audio…"), QKeySequence(Qt::CTRL | Qt::Key_I), [this] {
         const QStringList paths = QFileDialog::getOpenFileNames(this, QStringLiteral("Import audio"), QString(),
-                                                                QStringLiteral("WAV audio (*.wav);;All files (*)"));
+                                                                QStringLiteral("Audio (*.wav *.flac *.mp3 *.ogg *.oga);;All files (*)"));
         if (!paths.isEmpty())
             importFiles(paths);
     });
@@ -521,6 +523,18 @@ void MainWindow::wireModel()
             [this](const engine::Telemetry& t) { mixer_->setMasterPeak(t.masterPeak); });
     // Transport::deviceEvent is the P1 task 7 hook (device-loss recovery +
     // status bar); its ring drain already runs on the same 30 Hz timer.
+
+    // P1 task 5: the decode pool fills the MediaCache off the GUI thread;
+    // decoded arenas are pinned while the project is open (DESIGN §4.3) and
+    // the timeline repaints with real waveforms once peaks land.
+    connect(&decodePool_, &engine::DecodePool::ready, this, [this](const QString& path) {
+        mediaCache_.pin(path);
+        timeline_->viewport()->update();
+    });
+    connect(&decodePool_, &engine::DecodePool::failed, this,
+            [this](const QString& path, const QString& error) {
+                toast_->show(QStringLiteral("%1: %2").arg(QFileInfo(path).fileName(), error), true);
+            });
 
     connect(timeline_, &TimelineWidget::selectionChanged, this, [this](const QStringList& ids) {
         ai_->setSelectionScope(ids);
@@ -715,35 +729,49 @@ void MainWindow::importFiles(const QStringList& paths)
     int imported = 0;
     for (const auto& path : paths) {
         const QFileInfo fi(path);
-        if (fi.suffix().compare(QStringLiteral("wav"), Qt::CaseInsensitive) != 0) {
-            toast_->show(QStringLiteral("%1: FLAC/MP3/OGG decode arrives with the audio engine (P1). WAV imports now.").arg(fi.fileName()), true);
+        // probeWav stays the WAV pre-check (ROADMAP §2.7); every other format
+        // the decode pool handles imports through its metadata probe.
+        int sampleRate = 0, channels = 0;
+        int64_t frames = 0;
+        QString error;
+        const bool isWav = fi.suffix().compare(QStringLiteral("wav"), Qt::CaseInsensitive) == 0;
+        if (isWav) {
+            const core::MediaInfo info = core::probeWav(path);
+            if (!info.ok) {
+                toast_->show(QStringLiteral("%1: %2").arg(fi.fileName(), info.error), true);
+                continue;
+            }
+            sampleRate = info.sampleRate;
+            channels = info.channels;
+            frames = info.frames;
+        } else if (!engine::probeFile(path, sampleRate, channels, frames, error)) {
+            toast_->show(QStringLiteral("%1: %2").arg(fi.fileName(), error), true);
             continue;
         }
-        const core::MediaInfo info = core::probeWav(path);
-        if (!info.ok) {
-            toast_->show(QStringLiteral("%1: %2").arg(fi.fileName(), info.error), true);
-            continue;
-        }
+
         core::MediaItem m;
         m.id = core::newId();
         m.path = path;
-        m.format = QStringLiteral("wav");
-        m.sampleRate = info.sampleRate;
-        m.channels = info.channels;
-        m.frames = info.frames;
+        m.format = fi.suffix().toLower();
+        m.sampleRate = sampleRate;
+        m.channels = channels;
+        m.frames = frames;
         m.contentHash = sha256File(path);
 
         core::Clip c;
         c.id = core::newId();
         c.name = fi.completeBaseName();
-        c.length = info.frames;
+        c.length = frames;
         c.timelineStart = model_.project().duration();
 
         model_.push(new core::ImportMediaCommand(&model_, m, c, selectedTrackId()));
+        decodePool_.request(path); // PCM + peak LODs land off-GUI (P1 task 5)
         ++imported;
-        if (info.sampleRate != model_.project().sampleRate)
-            toast_->show(QStringLiteral("%1 is %2 Hz — resampling to the 48 kHz project rate arrives with the engine (P1).")
-                             .arg(fi.fileName()).arg(info.sampleRate));
+        if (sampleRate != model_.project().sampleRate)
+            toast_->show(QStringLiteral("%1 is %2 Hz — decoded at the %3 Hz project rate")
+                             .arg(fi.fileName())
+                             .arg(sampleRate)
+                             .arg(model_.project().sampleRate));
     }
     if (imported > 0) {
         toast_->show(QStringLiteral("Imported %1 file(s) — Ctrl+Z to undo").arg(imported));

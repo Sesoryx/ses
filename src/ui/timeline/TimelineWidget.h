@@ -4,7 +4,7 @@
 // waveform LOD blitting, full hit-test control. Every gesture commits one
 // undoable command on release (drag coalescing).
 
-#include "core/media/MediaProbe.h"
+#include "core/media/MediaCache.h"
 #include "core/model/ProjectModel.h"
 #include "ui/shell/Transport.h"
 
@@ -42,6 +42,10 @@ public:
     void clearSelection();
     void selectAll();
 
+    // Waveform source: decoded peak LODs in the GUI-side MediaCache (P1 task
+    // 5). Without a cache the timeline honestly draws no waveforms.
+    void setMediaCache(core::MediaCache* cache) { mediaCache_ = cache; }
+
     int64_t sampleAtX(int viewportX) const;
     int xOfSample(int64_t sample) const;
     int laneTop(int trackIndex) const;
@@ -75,7 +79,6 @@ private:
     void updateScrollbars();
     void drawRuler(QPainter& p);
     void drawClip(QPainter& p, const core::Track& track, const core::Clip& clip, int laneY);
-    const core::Peaks& peaksFor(const QString& mediaId, const QString& path, int64_t frames);
     Hit hitTest(const QPoint& pos) const;
     int trackAtY(int y) const;
     double niceStepSec() const;
@@ -104,7 +107,7 @@ private:
 
     QString hoverClip_;
     Drag hoverKind_ = Drag::None;
-    QHash<QString, core::Peaks> peaksCache_;
+    core::MediaCache* mediaCache_ = nullptr; // decoded peak LODs (not owned)
 };
 
 } // namespace ses::ui

@@ -1,5 +1,7 @@
 // tst_core — headless gate for the data layer (DESIGN.md §13).
 #include "core/commands/Commands.h"
+#include "core/media/AudioBuffer.h"
+#include "core/media/MediaCache.h"
 #include "core/media/MediaProbe.h"
 #include "core/model/Project.h"
 #include "core/model/ProjectModel.h"
@@ -16,9 +18,11 @@
 #include <QtEndian>
 #include <QtTest>
 
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 
 using namespace ses::core;
 
@@ -573,8 +577,17 @@ private slots:
         const MediaInfo info = probeWav(path);
         QVERIFY2(info.ok, qPrintable(info.error));
 
-        const Peaks peaks = computeWavPeaks(path, samples.size());
-        QVERIFY(peaks.valid());
+        // Peak LODs are folded from the decode stream in one pass (P1 task 5);
+        // the sanitize/clamp contract ported from computeWavPeaks is asserted
+        // on the builder at a 1-frame span (per-sample buckets), and end to end
+        // through decodeFile in tst_engine.
+        PeakBuilder builder(1);
+        for (float sample : samples)
+            builder.pushFrame(sample, sample);
+        const PeakPyramid pyramid = builder.finish();
+        QVERIFY(pyramid.valid());
+        const PeakLevel& peaks = pyramid.levels.first();
+        QCOMPARE(peaks.samplesPerBucket, 1);
         QCOMPARE(peaks.min.size(), samples.size());
         for (int i = 0; i < peaks.min.size(); ++i) {
             QVERIFY(std::isfinite(peaks.min[i]));
@@ -590,7 +603,7 @@ private slots:
         QCOMPARE(peaks.max[3], -1.0f);
     }
 
-    void wavProbeAndPeaks()
+    void wavProbeValidatesFixtures()
     {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
@@ -604,18 +617,6 @@ private slots:
         QCOMPARE(info.sampleRate, 48000);
         QCOMPARE(info.channels, 2);
         QCOMPARE(info.frames, 48000);
-
-        const Peaks pk = computeWavPeaks(path, 100);
-        QVERIFY(pk.valid());
-        QVERIFY(pk.min.size() >= 90 && pk.min.size() <= 110);
-        bool anySignal = false;
-        for (int i = 0; i < pk.min.size(); ++i) {
-            QVERIFY(pk.min[i] <= pk.max[i]);
-            QVERIFY(pk.min[i] >= -1.001f && pk.max[i] <= 1.001f);
-            if (pk.max[i] > 0.1f)
-                anySignal = true;
-        }
-        QVERIFY(anySignal);
 
         // Non-WAV is reported honestly, not guessed.
         QFile bad(dir.path() + QStringLiteral("/fake.wav"));
@@ -669,6 +670,87 @@ private slots:
         const MediaInfo invalidFrames = probeWav(badFact.fileName());
         QVERIFY(!invalidFrames.ok);
         QVERIFY(invalidFrames.error.contains(QStringLiteral("frame count")));
+    }
+
+    void peakPyramidFoldsLodsInOnePass()
+    {
+        // 1124 frames at a 256-frame base: level 0 holds 5 buckets, each level
+        // above folds two of the level below; the tail must not vanish at any
+        // LOD (levels end 5, 3, 2, 1 — the top bucket covers the whole signal).
+        PeakBuilder builder(256);
+        const int frames = 256 * 4 + 100;
+        for (int i = 0; i < frames; ++i) {
+            const float v = i % 2 == 0 ? 0.5f : -0.25f;
+            builder.pushFrame(v, v);
+        }
+        const PeakPyramid pyramid = builder.finish();
+        QVERIFY(pyramid.valid());
+        QCOMPARE(pyramid.levels.size(), 4);
+        const int expectedBuckets[] = { 5, 3, 2, 1 };
+        for (int k = 0; k < pyramid.levels.size(); ++k) {
+            const PeakLevel& level = pyramid.levels[k];
+            QCOMPARE(level.samplesPerBucket, int64_t(256) << k);
+            QCOMPARE(level.min.size(), expectedBuckets[k]);
+            for (int b = 0; b < level.min.size(); ++b) {
+                QCOMPARE(level.min[b], -0.25f);
+                QCOMPARE(level.max[b], 0.5f);
+            }
+        }
+
+        // pickLevel: the coarsest level whose buckets still fit one pixel
+        // column; never finer, never past the top.
+        QCOMPARE(pyramid.pickLevel(1).samplesPerBucket, int64_t(256));
+        QCOMPARE(pyramid.pickLevel(300).samplesPerBucket, int64_t(256));
+        QCOMPARE(pyramid.pickLevel(600).samplesPerBucket, int64_t(512));
+        QCOMPARE(pyramid.pickLevel(1124).samplesPerBucket, int64_t(1024));
+        QCOMPARE(pyramid.pickLevel(100000).samplesPerBucket, int64_t(2048));
+    }
+
+    void mediaCachePinsHoldsAndEvicts()
+    {
+        MediaCache cache;
+        const auto makeBuffer = [] {
+            auto buffer = std::make_shared<AudioBuffer>();
+            buffer->frames = 1;
+            return buffer;
+        };
+        cache.insert(QStringLiteral("a"), makeBuffer());
+        QCOMPARE(cache.size(), 1);
+        QVERIFY(cache.contains(QStringLiteral("a")));
+        QVERIFY(cache.find(QStringLiteral("a")));
+        QCOMPARE(cache.pinnedCount(), 0);
+
+        // (a) A live holder keeps the arena — never evict under a reference.
+        {
+            auto held = cache.find(QStringLiteral("a"));
+            QVERIFY(held);
+            QCOMPARE(cache.evict(std::chrono::milliseconds(0)), 0);
+            QVERIFY(cache.contains(QStringLiteral("a")));
+        }
+        // Pinned buffers survive even unreferenced (the project-open default).
+        cache.pin(QStringLiteral("a"));
+        QCOMPARE(cache.pinnedCount(), 1);
+        QCOMPARE(cache.evict(std::chrono::milliseconds(0)), 0);
+        QVERIFY(cache.contains(QStringLiteral("a")));
+        cache.unpin(QStringLiteral("a"));
+        // (b) Unpinned + unreferenced + past the grace → evicted.
+        QCOMPARE(cache.evict(std::chrono::milliseconds(0)), 1);
+        QCOMPARE(cache.size(), 0);
+
+        // The reclaim grace must actually pass first.
+        cache.insert(QStringLiteral("b"), makeBuffer());
+        QCOMPARE(cache.evict(std::chrono::hours(1)), 0);
+        QVERIFY(cache.contains(QStringLiteral("b")));
+        // pinAll keeps everything while the project is open.
+        cache.pinAll();
+        QCOMPARE(cache.pinnedCount(), 1);
+        QCOMPARE(cache.evict(std::chrono::milliseconds(0)), 0);
+        QVERIFY(cache.contains(QStringLiteral("b")));
+        // clear() drops the entries; holders keep their shared_ptr alive.
+        const auto held = cache.find(QStringLiteral("b"));
+        cache.clear();
+        QCOMPARE(cache.size(), 0);
+        QVERIFY(held);
     }
 };
 

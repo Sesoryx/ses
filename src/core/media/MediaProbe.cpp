@@ -103,40 +103,6 @@ bool parseFmt(QFile& f, const Chunk& c, FmtInfo& fmt)
     return fmt.channels > 0 && fmt.sampleRate > 0 && fmt.blockAlign > 0;
 }
 
-// Reads one sample of channel ch at frame index, normalized to [-1,1].
-double readSample(const QByteArray& frame, const FmtInfo& fmt, int ch)
-{
-    const int bytes = fmt.bits / 8;
-    const uchar* p = reinterpret_cast<const uchar*>(frame.constData()) + ch * bytes;
-    if (fmt.format == 3) {
-        if (fmt.bits == 32) {
-            const uint32_t u = qFromLittleEndian<uint32_t>(p);
-            float v;
-            std::memcpy(&v, &u, 4);
-            return std::isfinite(v) ? v : 0.0;
-        }
-        if (fmt.bits == 64) {
-            const uint64_t u = qFromLittleEndian<uint64_t>(p);
-            double v;
-            std::memcpy(&v, &u, 8);
-            return std::isfinite(v) ? v : 0.0;
-        }
-        return 0.0;
-    }
-    switch (fmt.bits) {
-    case 8: return (double(p[0]) - 128.0) / 128.0; // unsigned
-    case 16: return double(qFromLittleEndian<int16_t>(p)) / 32768.0;
-    case 24: {
-        int32_t v = int32_t(p[0]) | (int32_t(p[1]) << 8) | (int32_t(p[2]) << 16);
-        if (v & 0x800000)
-            v |= int32_t(0xFF000000); // sign extend
-        return double(v) / 8388608.0;
-    }
-    case 32: return double(qFromLittleEndian<int32_t>(p)) / 2147483648.0;
-    default: return 0.0;
-    }
-}
-
 } // namespace
 
 MediaInfo probeWav(const QString& path)
@@ -212,73 +178,6 @@ MediaInfo probeWav(const QString& path)
     info.isFloat = fmt.format == 3;
     info.frames = factFrames >= 0 ? factFrames : dataFrames;
     return info;
-}
-
-Peaks computeWavPeaks(const QString& path, int buckets)
-{
-    Peaks peaks;
-    const MediaInfo info = probeWav(path);
-    if (!info.ok || info.frames <= 0 || buckets <= 0)
-        return peaks;
-
-    QFile f(path);
-    if (!f.open(QIODevice::ReadOnly))
-        return peaks;
-    RiffReader riff(f);
-    FmtInfo fmt;
-    int64_t dataPos = -1, dataSize = 0;
-    Chunk c;
-    while (riff.next(c)) {
-        if (std::strcmp(c.id, "fmt ") == 0)
-            parseFmt(f, c, fmt);
-        else if (std::strcmp(c.id, "data") == 0) {
-            dataPos = c.dataPos;
-            dataSize = c.size;
-        }
-    }
-    if (!riff.valid() || dataPos < 0 || fmt.blockAlign == 0)
-        return peaks;
-
-    const int64_t frames = std::min<int64_t>(info.frames, dataSize / fmt.blockAlign);
-    const int64_t perBucket = std::max<int64_t>(1, frames / buckets);
-    const int nBuckets = int((frames + perBucket - 1) / perBucket);
-    peaks.min.resize(nBuckets);
-    peaks.max.resize(nBuckets);
-    peaks.samplesPerBucket = perBucket;
-
-    f.seek(dataPos);
-    const int64_t chunkFrames = std::max<int64_t>(1, (1024 * 1024) / fmt.blockAlign);
-    QByteArray buf;
-    buf.resize(int(chunkFrames * fmt.blockAlign));
-    int64_t frame = 0;
-    while (frame < frames) {
-        const int64_t want = std::min(chunkFrames, frames - frame);
-        const qint64 got = f.read(buf.data(), want * fmt.blockAlign);
-        if (got <= 0 || got % fmt.blockAlign != 0)
-            return {};
-        const int64_t gotFrames = got / fmt.blockAlign;
-        for (int64_t i = 0; i < gotFrames; ++i) {
-            const int64_t abs = frame + i;
-            const int b = int(abs / perBucket);
-            const QByteArray frameData = QByteArray::fromRawData(buf.constData() + i * fmt.blockAlign, fmt.blockAlign);
-            double mix = 0.0;
-            for (int ch = 0; ch < fmt.channels; ++ch)
-                mix += readSample(frameData, fmt, ch);
-            mix = std::clamp(mix / fmt.channels, -1.0, 1.0);
-            const float v = float(mix);
-            if (abs % perBucket == 0) {
-                peaks.min[b] = v;
-                peaks.max[b] = v;
-            } else {
-                peaks.min[b] = std::min(peaks.min[b], v);
-                peaks.max[b] = std::max(peaks.max[b], v);
-            }
-        }
-        frame += gotFrames;
-    }
-    if (frame != frames)
-        return {};
-    return peaks;
 }
 
 bool writeTestWav(const QString& path, double seconds, int sampleRate, int channels)

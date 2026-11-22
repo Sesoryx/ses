@@ -37,6 +37,13 @@ SmokeResult runSmoke(MainWindow& w)
     check(w.model().project().mediaPool.size() == 1, "import registers media item");
     check(!w.model().project().mediaPool.first().contentHash.isEmpty(), "media hashed on import");
 
+    // P1 task 5: the decode pool caches the arena and folds peak LODs.
+    w.decodePool().waitForDone();
+    check(w.mediaCache().contains(wav), "decode pool fills the media cache");
+    const auto decoded = w.mediaCache().find(wav);
+    check(decoded && decoded->frames == 96000, "decoded arena holds the file PCM");
+    check(decoded && decoded->peaks.valid(), "peak LODs folded during decode");
+
     const QString clipId = w.model().project().tracks.first().clips.first().id;
     w.transport()->seek(48000);
     w.timeline()->selectClips({ clipId });

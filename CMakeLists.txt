@@ -32,6 +32,8 @@ add_library(ses_core STATIC
   src/core/render/FadeCurve.cpp
   src/core/persistence/Settings.cpp
   src/core/media/MediaProbe.cpp
+  src/core/media/AudioBuffer.cpp
+  src/core/media/MediaCache.cpp
 )
 target_include_directories(ses_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(ses_core PUBLIC Qt6::Core Qt6::Widgets)
@@ -47,17 +49,24 @@ endif()
 add_library(miniaudio INTERFACE)
 target_include_directories(miniaudio INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/external/miniaudio)
 
-# ---- engine: RT audio facade (NO Qt). Real device + decode pool live here. ---
+# ---- libsndfile: decode complement (OGG length+seek, export control; -------
+# ROADMAP §4). LGPL → dynamic link via pkg-config.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SNDFILE REQUIRED IMPORTED_TARGET sndfile)
+
+# ---- engine: RT audio facade (NO Qt on the RT path). Real device + decode ---
+# pool live here (engine ──► core for the MediaCache/Arena types, DESIGN §3).
 add_library(ses_engine STATIC
   src/engine/Engine.cpp
   src/engine/io/miniaudio_impl.cpp
   src/engine/io/AudioDevice.cpp
+  src/engine/io/Decode.cpp
 )
 target_include_directories(ses_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 # Keep the 95k-line header out of unity batches (ROADMAP §2.2).
 set_source_files_properties(src/engine/io/miniaudio_impl.cpp
   PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
-target_link_libraries(ses_engine PUBLIC miniaudio)
+target_link_libraries(ses_engine PUBLIC miniaudio ses_core PkgConfig::SNDFILE)
 
 # ---- inference: catalog data only for now; audio.cpp ABI lands in P5. -------
 add_library(ses_inference STATIC

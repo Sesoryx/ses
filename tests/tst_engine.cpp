@@ -1,16 +1,57 @@
+#include "core/media/MediaProbe.h"
 #include "engine/Engine.h"
 #include "engine/io/AudioDevice.h"
+#include "engine/io/Decode.h"
 #include "engine/BlockMixer.h"
 #include "engine/SpscRing.h"
 
+#include <QFile>
+#include <QSignalSpy>
+#include <QTemporaryDir>
 #include <QtTest>
 
+#include <sndfile.h>
+
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <thread>
+#include <vector>
 
 using namespace ses::engine;
+
+namespace {
+
+// Sine fixture as OGG/Vorbis at an arbitrary rate. Returns false when this
+// libsndfile build lacks the Vorbis encoder — tests then skip honestly.
+bool writeTestOgg(const QString& path, double seconds, int sampleRate)
+{
+    SF_INFO info{};
+    info.samplerate = sampleRate;
+    info.channels = 2;
+    info.format = SF_FORMAT_OGG | SF_FORMAT_VORBIS;
+    SNDFILE* file = sf_open(path.toUtf8().constData(), SFM_WRITE, &info);
+    if (!file)
+        return false;
+    constexpr int kChunk = 512;
+    std::vector<float> buf(std::size_t(kChunk) * 2);
+    const int64_t total = int64_t(seconds * sampleRate);
+    for (int64_t i = 0; i < total; i += kChunk) {
+        const int n = int(std::min<int64_t>(kChunk, total - i));
+        for (int j = 0; j < n; ++j) {
+            const float v = 0.5f * std::sin(2.0 * M_PI * 440.0 * double(i + j) / sampleRate);
+            buf[std::size_t(j) * 2] = v;
+            buf[std::size_t(j) * 2 + 1] = v;
+        }
+        sf_writef_float(file, buf.data(), n);
+    }
+    sf_close(file);
+    return true;
+}
+
+} // namespace
 
 class TestEngineCore : public QObject {
     Q_OBJECT
@@ -299,6 +340,157 @@ private slots:
         float sentinel = 7.0f;
         mixer.render(0, std::numeric_limits<std::size_t>::max() / 2 + 1, &sentinel);
         QCOMPARE(sentinel, 7.0f); // reject output-size overflow without writing
+    }
+
+    void decodeWavToProjectRateWithPeakLods()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString wav = dir.path() + QStringLiteral("/tone.wav");
+        QVERIFY(ses::core::writeTestWav(wav, 1.0, 48000, 2));
+
+        DecodedAudio out;
+        QVERIFY2(decodeFile(wav, out), qPrintable(out.error));
+        QVERIFY(out.error.isEmpty());
+        QCOMPARE(out.sampleRate, 48000);
+        QCOMPARE(out.channels, 2);
+        QCOMPARE(out.frames, int64_t(48000));
+        QCOMPARE(out.pcm.size(), std::size_t(96000));
+        float peak = 0.0f;
+        for (float v : out.pcm) {
+            QVERIFY(std::isfinite(v));
+            peak = std::max(peak, std::abs(v));
+        }
+        QVERIFY(peak > 0.1f);
+
+        // Peak LODs are folded in the same read pass (§2.7); a ground-truth
+        // fold of the decoded PCM must match bucket for bucket.
+        QVERIFY(out.peaks.valid());
+        const ses::core::PeakLevel& level = out.peaks.levels.first();
+        QCOMPARE(level.samplesPerBucket, ses::core::PeakPyramid::kBaseSpan);
+        const int64_t buckets = (out.frames + level.samplesPerBucket - 1) / level.samplesPerBucket;
+        QCOMPARE(level.min.size(), int(buckets));
+        QVector<float> gmin(int(buckets), 1.0f), gmax(int(buckets), -1.0f);
+        for (int64_t i = 0; i < out.frames; ++i) {
+            float m = (out.pcm[std::size_t(i) * 2] + out.pcm[std::size_t(i) * 2 + 1]) * 0.5f;
+            if (!std::isfinite(m))
+                m = 0.0f;
+            m = std::clamp(m, -1.0f, 1.0f);
+            const int b = int(i / level.samplesPerBucket);
+            gmin[b] = std::min(gmin[b], m);
+            gmax[b] = std::max(gmax[b], m);
+        }
+        for (int b = 0; b < gmin.size(); ++b) {
+            QCOMPARE(level.min[b], gmin[b]);
+            QCOMPARE(level.max[b], gmax[b]);
+        }
+    }
+
+    void decodeRejectsGarbageHonestly()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString junk = dir.path() + QStringLiteral("/junk.flac");
+        QFile f(junk);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("this is not audio at all");
+        f.close();
+
+        DecodedAudio out;
+        QVERIFY(!decodeFile(junk, out));
+        QVERIFY(!out.error.isEmpty());
+        QVERIFY(out.pcm.empty());
+        QCOMPARE(out.frames, int64_t(0));
+    }
+
+    void decodeOggFallsBackToSndfileAndResamples()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString ogg = dir.path() + QStringLiteral("/tone.ogg");
+        if (!writeTestOgg(ogg, 0.5, 44100))
+            QSKIP("this libsndfile build has no OGG/Vorbis encoder — external .ogg files still decode");
+
+        DecodedAudio out;
+        QVERIFY2(decodeFile(ogg, out), qPrintable(out.error));
+        QCOMPARE(out.sampleRate, 48000); // 44.1 kHz source → project rate
+        QCOMPARE(out.channels, 2);
+        // 0.5 s at 44.1 kHz → 24000 frames at 48 kHz (± resampler tail).
+        QVERIFY(std::abs(out.frames - 24000) <= 32);
+        float peak = 0.0f;
+        for (float v : out.pcm) {
+            QVERIFY(std::isfinite(v));
+            peak = std::max(peak, std::abs(v));
+        }
+        QVERIFY(peak > 0.1f);
+        QVERIFY(out.peaks.valid());
+    }
+
+    void probeReportsFileMetadata()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString wav = dir.path() + QStringLiteral("/p.wav");
+        QVERIFY(ses::core::writeTestWav(wav, 1.0, 48000, 2));
+        int rate = 0, channels = 0;
+        int64_t frames = 0;
+        QString error;
+        QVERIFY(probeFile(wav, rate, channels, frames, error));
+        QCOMPARE(rate, 48000);
+        QCOMPARE(channels, 2);
+        QCOMPARE(frames, int64_t(48000));
+
+        const QString junk = dir.path() + QStringLiteral("/p.bin");
+        QFile f(junk);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("garbage");
+        f.close();
+        QVERIFY(!probeFile(junk, rate, channels, frames, error));
+        QVERIFY(!error.isEmpty());
+        QCOMPARE(frames, int64_t(0));
+    }
+
+    void decodePoolFillsMediaCache()
+    {
+        ses::core::MediaCache cache;
+        DecodePool pool(&cache);
+        QSignalSpy readySpy(&pool, &DecodePool::ready);
+        QSignalSpy failSpy(&pool, &DecodePool::failed);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString wav = dir.path() + QStringLiteral("/pool.wav");
+        QVERIFY(ses::core::writeTestWav(wav, 1.0, 48000, 2));
+
+        pool.request(wav);
+        QVERIFY(readySpy.wait(10000));
+        QCOMPARE(readySpy.count(), 1);
+        QCOMPARE(readySpy.first().at(0).toString(), wav);
+        QCOMPARE(cache.size(), 1);
+
+        const auto buffer = cache.find(wav);
+        QVERIFY(buffer);
+        QCOMPARE(buffer->frames, int64_t(48000));
+        QCOMPARE(buffer->sampleRate, 48000);
+        QVERIFY(buffer->peaks.valid());
+
+        // A cached path answers immediately — no second decode.
+        pool.request(wav);
+        QCOMPARE(readySpy.count(), 2);
+
+        // Failures are honest and leave the cache clean.
+        const QString junk = dir.path() + QStringLiteral("/pool.flac");
+        QFile f(junk);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("not audio");
+        f.close();
+        pool.request(junk);
+        QVERIFY(failSpy.wait(10000));
+        QCOMPARE(failSpy.count(), 1);
+        QVERIFY(!failSpy.first().at(1).toString().isEmpty());
+        QVERIFY(!cache.contains(junk));
+
+        pool.waitForDone();
+        QVERIFY(!pool.busy());
     }
 };
 

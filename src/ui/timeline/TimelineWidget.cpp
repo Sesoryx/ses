@@ -155,7 +155,6 @@ void TimelineWidget::zoomAt(double factor, QPoint viewportPos)
     updateScrollbars();
     const int target = int(double(anchor) / model_->project().sampleRate * pxPerSec_) - viewportPos.x();
     horizontalScrollBar()->setValue(std::clamp(target, 0, horizontalScrollBar()->maximum()));
-    peaksCache_.clear(); // bucket size changed
     emit zoomChanged(pxPerSec_);
     viewport()->update();
 }
@@ -168,7 +167,6 @@ void TimelineWidget::zoomToFit()
     const double sec = double(dur) / model_->project().sampleRate;
     pxPerSec_ = std::clamp((viewport()->width() - 48) / sec, 2.0, 20000.0);
     horizontalScrollBar()->setValue(0);
-    peaksCache_.clear();
     updateScrollbars();
     emit zoomChanged(pxPerSec_);
     viewport()->update();
@@ -317,18 +315,6 @@ void TimelineWidget::drawRuler(QPainter& p)
     }
 }
 
-const core::Peaks& TimelineWidget::peaksFor(const QString& mediaId, const QString& path, int64_t frames)
-{
-    const int64_t spb = std::max<int64_t>(1, int64_t(model_->project().sampleRate / pxPerSec_));
-    const QString key = mediaId + QLatin1Char(':') + QString::number(spb);
-    auto it = peaksCache_.find(key);
-    if (it != peaksCache_.end())
-        return it.value();
-    const int buckets = int(std::clamp<int64_t>(frames / spb, 64, 20000));
-    core::Peaks pk = core::computeWavPeaks(path, buckets);
-    return peaksCache_.insert(key, pk).value();
-}
-
 void TimelineWidget::drawClip(QPainter& p, const Track& track, const Clip& clip, int laneY)
 {
     ThemeManager* th = ThemeManager::instance();
@@ -349,22 +335,38 @@ void TimelineWidget::drawClip(QPainter& p, const Track& track, const Clip& clip,
     // Track-color identity strip.
     p.fillRect(QRectF(x, laneY + 5, w, 3), alpha(QColor(track.color), 170));
 
-    // Waveform (cached LOD blit, one bucket per pixel column).
+    // Waveform (decoded peak-LOD blit, P1 task 5): pick the pyramid level
+    // whose buckets fit one pixel column and fold the few it spans per column.
     const core::MediaItem* media = proj.mediaById(clip.mediaId);
     const double cy = r.center().y();
     const double halfH = (r.height() - 12) / 2.0;
     if (media && media->frames > 0) {
-        const core::Peaks& pk = peaksFor(clip.mediaId, media->path, media->frames);
-        if (pk.valid()) {
+        const std::shared_ptr<const core::AudioBuffer> buffer =
+            mediaCache_ ? mediaCache_->find(media->path) : nullptr;
+        if (buffer && buffer->peaks.valid()) {
+            const int64_t spb = std::max<int64_t>(1, int64_t(rate / pxPerSec_));
+            const core::PeakLevel& level = buffer->peaks.pickLevel(spb);
             p.setPen(QPen(th->color(QStringLiteral("waveform")), 1));
             const int c0 = int(std::max(r.left(), 0.0));
             const int c1 = int(std::min(r.right(), double(viewport()->width())));
+            const int64_t span = level.samplesPerBucket;
             for (int col = c0; col < c1; ++col) {
-                const int64_t s = tr.sourceOffset + int64_t((col - x) / pxPerSec_ * rate);
-                const int64_t b = s / pk.samplesPerBucket;
-                if (b < 0 || b >= pk.min.size())
+                const int64_t s0 = tr.sourceOffset + int64_t((col - x) / pxPerSec_ * rate);
+                const int64_t s1 = std::max(
+                    s0 + 1, tr.sourceOffset + int64_t((col + 1 - x) / pxPerSec_ * rate));
+                int64_t b0 = s0 / span;
+                int64_t b1 = (s1 - 1) / span;
+                if (b1 < 0 || b0 >= level.min.size())
                     continue;
-                p.drawLine(QPointF(col + 0.5, cy - pk.max[b] * halfH), QPointF(col + 0.5, cy - pk.min[b] * halfH));
+                b0 = std::max<int64_t>(b0, 0);
+                b1 = std::min<int64_t>(b1, level.min.size() - 1);
+                float mn = level.min[int(b0)];
+                float mx = level.max[int(b0)];
+                for (int64_t b = b0 + 1; b <= b1; ++b) {
+                    mn = std::min(mn, level.min[int(b)]);
+                    mx = std::max(mx, level.max[int(b)]);
+                }
+                p.drawLine(QPointF(col + 0.5, cy - mx * halfH), QPointF(col + 0.5, cy - mn * halfH));
             }
         }
     } else {

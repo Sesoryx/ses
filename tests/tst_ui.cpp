@@ -1,5 +1,6 @@
 // tst_ui — offscreen gate for the shell (DESIGN.md §13): theme, contrast,
 // A/B fader, timeline math, the smoke journey, shortcut guard.
+#include "core/media/MediaCache.h"
 #include "core/media/MediaProbe.h"
 #include "core/persistence/Settings.h"
 #include "ui/mixer/AbFader.h"
@@ -13,6 +14,7 @@
 
 #include <QApplication>
 #include <QFile>
+#include <QImage>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QPalette>
@@ -207,7 +209,7 @@ private slots:
         QVERIFY2(r.ok, qPrintable(r.detail));
     }
 
-    void nonWavRejectedHonestly()
+    void unreadableFileRejectedHonestly()
     {
         MainWindow w;
         w.importFiles({ QStringLiteral("/nonexistent/song.mp3") });
@@ -233,6 +235,45 @@ private slots:
         QKeyEvent override2(QEvent::ShortcutOverride, Qt::Key_S, Qt::NoModifier);
         QApplication::sendEvent(qApp, &override2);
         QVERIFY(!override2.isAccepted()); // app shortcut may fire
+    }
+
+    void waveformDrawsFromDecodedPeaks()
+    {
+        MainWindow w;
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString wav = dir.path() + QStringLiteral("/wave.wav");
+        QVERIFY(ses::core::writeTestWav(wav, 1.0));
+        w.importFiles({ wav });
+        w.decodePool().waitForDone();
+        QVERIFY(w.mediaCache().contains(wav));
+
+        TimelineWidget* tl = w.timeline();
+        const QSize size = tl->viewport()->size();
+        QVERIFY(size.width() > 0);
+        QVERIFY(size.height() > 0);
+        const auto render = [&] {
+            // grab() runs the widget's paint path (viewport()->render() skips
+            // QAbstractScrollArea's paint forwarding).
+            return tl->grab().toImage();
+        };
+
+        // Without decoded peaks the same clip paints no waveform ...
+        w.mediaCache().clear();
+        const QImage withoutWave = render();
+        // ... and the decoded peak LODs draw it (computeWavPeaks is gone).
+        w.decodePool().request(wav);
+        w.decodePool().waitForDone();
+        const QImage withWave = render();
+        QCOMPARE(withWave.size(), withoutWave.size());
+
+        int changed = 0;
+        for (int y = 0; y < withoutWave.height(); ++y)
+            for (int x = 0; x < withoutWave.width(); ++x)
+                if (withoutWave.pixel(x, y) != withWave.pixel(x, y))
+                    ++changed;
+        QVERIFY2(changed > 20,
+                 qPrintable(QStringLiteral("waveform changed only %1 pixels").arg(changed)));
     }
 };
 
