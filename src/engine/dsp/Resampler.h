@@ -36,7 +36,10 @@ public:
     void close();
 
     // Fresh signal after a seek: the old tail must not stay audible (§3.3).
-    // RT-callable, allocation-free.
+    // RT-callable and allocation-free. Realtime instances mute the tail for a
+    // bounded window: soxr_clear() discards buffers that soxr_process()
+    // allocated lazily, forcing the next process call to allocate again — the
+    // RT allocation guard (DESIGN §13) forbids that. Offline instances clear.
     void reset();
 
     // Streaming conversion. inConsumed reports the input frames eaten; the
@@ -56,6 +59,9 @@ private:
     int inRate_ = 0;
     int outRate_ = 0;
     int channels_ = 0;
+    bool realtime_ = false;
+    std::size_t muteFrames_ = 0;    // output frames covering the stale tail
+    std::size_t muteRemaining_ = 0; // frames still to mute after a reset
 };
 
 } // namespace ses::engine

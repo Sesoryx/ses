@@ -85,7 +85,11 @@ private:
     // carry are RT-owned after open and never resized there.
     Resampler src_;
     std::vector<float> srcIn_;
-    std::size_t srcCarry_ = 0;
+    std::vector<float> srcOut_;    // soxr output carry (one large scratch block)
+    std::size_t srcCarry_ = 0;     // input frames not yet consumed by soxr
+    std::size_t srcOutFrames_ = 0; // output frames produced but not yet played
+    int64_t srcRenderPos_ = 0;     // input cursor (may lead the audible head)
+    int64_t srcPlayRem_ = 0;       // fractional playhead accumulator
     int projectRate_ = 48000;
 };
 

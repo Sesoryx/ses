@@ -1,5 +1,7 @@
 #include "engine/io/AudioDevice.h"
 
+#include "engine/rt/RtAllocationGuard.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -12,8 +14,9 @@ namespace {
 // RT. The demand-driven render keeps the carry bounded to roughly one device
 // block of project frames plus the latency margin.
 constexpr std::size_t kSrcInCapFrames = 8192;
-constexpr std::size_t kSrcMarginFrames = 64; // soxr latency headroom
-constexpr int kSrcMaxIter = 64;              // pathological-input guard
+constexpr std::size_t kSrcOutCapFrames = 2048; // one soxr output block
+constexpr std::size_t kSrcMarginFrames = 64;   // soxr latency headroom
+constexpr int kSrcMaxIter = 64;                // pathological-input guard
 
 } // namespace
 
@@ -70,7 +73,11 @@ bool AudioDevice::init(const ma_backend* backends, ma_uint32 backendCount,
             return false;
         }
         srcIn_.assign(kSrcInCapFrames * 2, 0.0f);
+        srcOut_.assign(kSrcOutCapFrames * 2, 0.0f);
         srcCarry_ = 0;
+        srcOutFrames_ = 0;
+        srcRenderPos_ = 0;
+        srcPlayRem_ = 0;
     }
     return true;
 }
@@ -86,7 +93,12 @@ void AudioDevice::close()
     src_.close();
     srcIn_.clear();
     srcIn_.shrink_to_fit();
+    srcOut_.clear();
+    srcOut_.shrink_to_fit();
     srcCarry_ = 0;
+    srcOutFrames_ = 0;
+    srcRenderPos_ = 0;
+    srcPlayRem_ = 0;
 }
 
 bool AudioDevice::start()
@@ -107,6 +119,8 @@ int AudioDevice::actualSampleRate() const
 
 void AudioDevice::dataCallback(ma_device* dev, void* out, const void* /*in*/, ma_uint32 frames)
 {
+    // DESIGN §13: arms the test interposer (if loaded) for the whole callback.
+    RtAllocationScope allocScope;
     auto* self = static_cast<AudioDevice*>(dev->pUserData);
     self->applyCommands(); // ring drain; seek/playhead/loop happen here, at block boundaries
 
@@ -141,53 +155,94 @@ void AudioDevice::dataCallback(ma_device* dev, void* out, const void* /*in*/, ma
 
 // RT: mixer.render at the project rate → soxr_process → device out (ROADMAP
 // §3.3). All scratch was allocated in init(); nothing here allocates, locks,
-// or blocks. Input is rendered demand-driven (enough project frames for the
-// remaining output plus a latency margin), so the carry between callbacks
-// stays bounded and the playhead advances only by frames soxr actually ate.
+// or blocks. soxr always writes into the full preallocated output scratch and
+// surplus output is carried to the next block: handing it a shrinking 5-frame
+// tail at block boundaries made it stall, which surfaced as an underrun.
 void AudioDevice::renderThroughSrc(float* dst, std::size_t frames)
 {
     const int64_t head = playhead_.load(std::memory_order_relaxed);
+    int64_t renderPos = srcRenderPos_; // may lead the audible playhead
     const double ratio = double(projectRate_) / double(actualSampleRate());
-    std::size_t bufFrames = srcCarry_; // scratch holds [head, head+srcCarry_)
+    std::size_t written = 0;
+
+    // Deliver output carried from the previous block first.
+    if (srcOutFrames_ > 0) {
+        const std::size_t n = std::min(frames, srcOutFrames_);
+        std::memcpy(dst, srcOut_.data(), n * 2 * sizeof(float));
+        written = n;
+        srcOutFrames_ -= n;
+        if (srcOutFrames_ > 0) {
+            std::memmove(srcOut_.data(), srcOut_.data() + n * 2,
+                         srcOutFrames_ * 2 * sizeof(float));
+        }
+    }
+
+    std::size_t bufFrames = srcCarry_; // holds [renderPos + consumed, …)
     std::size_t consumed = 0;
-    std::size_t produced = 0;
     int guard = 0;
-    while (produced < frames && guard++ < kSrcMaxIter) {
+    while (written < frames && guard++ < kSrcMaxIter) {
         if (bufFrames == 0) {
             const std::size_t want = std::min(
                 kSrcInCapFrames,
-                std::size_t(double(frames - produced) * ratio) + kSrcMarginFrames);
-            mixer_.render(head + static_cast<int64_t>(consumed), want, srcIn_.data());
+                std::size_t(double(frames - written) * ratio) + kSrcMarginFrames);
+            mixer_.render(renderPos + static_cast<int64_t>(consumed), want, srcIn_.data());
             bufFrames = want;
         }
         std::size_t idone = 0;
         const std::size_t made = src_.process(srcIn_.data(), bufFrames,
-                                              dst + produced * 2,
-                                              frames - produced, idone);
-        produced += made;
+                                              srcOut_.data(), kSrcOutCapFrames, idone);
         consumed += idone;
         bufFrames -= idone;
         if (idone > 0 && bufFrames > 0) {
             std::memmove(srcIn_.data(), srcIn_.data() + idone * 2,
                          bufFrames * 2 * sizeof(float));
         }
-        if (idone == 0 && made == 0)
-            break; // no progress — fill the rest with silence below
+        if (made > 0) {
+            const std::size_t n = std::min(made, frames - written);
+            std::memcpy(dst + written * 2, srcOut_.data(), n * 2 * sizeof(float));
+            written += n;
+            srcOutFrames_ = made - n;
+            if (srcOutFrames_ > 0) {
+                std::memmove(srcOut_.data(), srcOut_.data() + n * 2,
+                             srcOutFrames_ * 2 * sizeof(float));
+            }
+        } else if (idone == 0) {
+            // No input consumed and no output produced: feed more input. The
+            // scratch cap and the iteration guard keep this bounded.
+            if (bufFrames >= kSrcInCapFrames)
+                break;
+            const std::size_t extra = std::min(
+                kSrcInCapFrames - bufFrames,
+                std::max<std::size_t>(kSrcMarginFrames, frames * 2));
+            mixer_.render(renderPos + static_cast<int64_t>(consumed + bufFrames), extra,
+                          srcIn_.data() + bufFrames * 2);
+            bufFrames += extra;
+        }
     }
     srcCarry_ = bufFrames;
+    srcRenderPos_ = renderPos + static_cast<int64_t>(consumed);
 
-    int64_t next = head + static_cast<int64_t>(consumed);
+    // The audible head advances with output actually delivered, at the exact
+    // project/device ratio (integer remainder carried), not with the input the
+    // resampler consumed ahead of its output carry.
+    const int64_t scaled = static_cast<int64_t>(written) * projectRate_ + srcPlayRem_;
+    const int64_t advance = scaled / actualSampleRate();
+    srcPlayRem_ = scaled % actualSampleRate();
+    int64_t next = head + advance;
     if (loop_ && loopEnd_ > loopStart_ && next >= loopEnd_) {
         next = loopStart_; // loop wrap at the block boundary (P1 simplicity)
-        // The carried tail was rendered past the loop end — drop it.
+        // Carried input/output was rendered past the loop end — drop it.
         src_.reset();
         srcCarry_ = 0;
+        srcOutFrames_ = 0;
+        srcRenderPos_ = loopStart_;
+        srcPlayRem_ = 0;
     }
     playhead_.store(next, std::memory_order_relaxed);
 
-    if (produced < frames) {
+    if (written < frames) {
         // Honest underrun: the chain could not fill the device block.
-        std::fill_n(dst + produced * 2, (frames - produced) * 2, 0.0f);
+        std::fill_n(dst + written * 2, (frames - written) * 2, 0.0f);
         ++underruns_;
     }
 }
@@ -220,8 +275,11 @@ void AudioDevice::applyCommands()
         case RtCommand::Stop:
             playing_.store(false, std::memory_order_relaxed);
             if (src_.active()) {
-                src_.reset(); // drop the stale tail while parked (§3.3)
+                src_.reset(); // mute the stale tail while parked (§3.3)
                 srcCarry_ = 0;
+                srcOutFrames_ = 0;
+                srcRenderPos_ = playhead_.load(std::memory_order_relaxed);
+                srcPlayRem_ = 0;
             }
             break;
         case RtCommand::Seek:
@@ -229,8 +287,11 @@ void AudioDevice::applyCommands()
             // RT is never blocked (DESIGN §4.4).
             playhead_.store(cmd.a, std::memory_order_relaxed);
             if (src_.active()) {
-                src_.reset(); // §3.3: clear on seek, or the old tail stays audible
+                src_.reset(); // §3.3: mute the old tail, or it stays audible after a seek
                 srcCarry_ = 0;
+                srcOutFrames_ = 0;
+                srcRenderPos_ = cmd.a;
+                srcPlayRem_ = 0;
             }
             break;
         case RtCommand::SetLoop:

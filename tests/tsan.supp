@@ -1,0 +1,10 @@
+# ThreadSanitizer suppressions for the ses engine gate.
+#
+# Qt 6.12 is not built with TSan instrumentation. TSan still intercepts the
+# pthread primitives Qt uses and reports races inside Qt's own thread-pool and
+# QtTest watchdog teardown (condition-variable destroy vs wait, stack memset vs
+# wait, and the watchdog thread outliving the test function). Those reports do
+# not involve ses code. Suppress only the Qt frames — ses symbols stay checked.
+race:QWaitCondition::~QWaitCondition
+race:libQt6Test.so*
+thread:QThread::start

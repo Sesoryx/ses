@@ -136,6 +136,23 @@ private:
         return t;
     }
 
+    // Device notifications arrive from miniaudio's own thread; under TSan they
+    // can land after start()/stop() returns. Poll instead of assuming timing.
+    template <typename Source>
+    static bool waitForDeviceEvent(Source& source, DeviceEvent::Kind kind)
+    {
+        DeviceEvent event{};
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline) {
+            while (source.nextDeviceEvent(event)) {
+                if (event.kind == kind)
+                    return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return false;
+    }
+
     // Same idea for the Engine facade: polls state() until pred() matches or
     // the deadline passes.
     static TransportState waitForState(DeviceEngine& engine, int sleepMs,
@@ -216,13 +233,9 @@ private slots:
         QCOMPARE(dev.actualSampleRate(), 48000);
         QVERIFY(!dev.masterSrcActive()); // matching rates — no SRC chain
         QVERIFY(dev.start());
-        DeviceEvent event{};
-        QVERIFY(dev.nextDeviceEvent(event));
-        QCOMPARE(int(event.kind), int(DeviceEvent::Started));
+        QVERIFY(waitForDeviceEvent(dev, DeviceEvent::Started));
         dev.stop();
-        DeviceEvent stopped{};
-        QVERIFY(dev.nextDeviceEvent(stopped));
-        QCOMPARE(int(stopped.kind), int(DeviceEvent::Stopped));
+        QVERIFY(waitForDeviceEvent(dev, DeviceEvent::Stopped));
         QVERIFY(!dev.playing());
         dev.close();
         QVERIFY(!dev.start()); // closed device refuses to start
@@ -235,9 +248,13 @@ private slots:
         AudioDevice dev;
         QVERIFY(dev.openOnBackend(ma_backend_null, 48000, 256));
         QVERIFY(dev.start());
+        QVERIFY(waitForDeviceEvent(dev, DeviceEvent::Started));
         DeviceEvent e{};
-        while (dev.nextDeviceEvent(e)) { } // drain Started
+        while (dev.nextDeviceEvent(e)) { } // drain anything already queued
         dev.close();
+        // Teardown notifications must be suppressed; give an in-flight one time
+        // to arrive before asserting the ring stays empty.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
         QVERIFY(!dev.nextDeviceEvent(e));
     }
 
@@ -340,9 +357,7 @@ private slots:
         QVERIFY(st.playhead >= 256);
         QVERIFY(engine.start()); // explicit start is idempotent
 
-        DeviceEvent event{};
-        QVERIFY(engine.nextDeviceEvent(event)); // the pump announced itself
-        QCOMPARE(int(event.kind), int(DeviceEvent::Started));
+        QVERIFY(waitForDeviceEvent(engine, DeviceEvent::Started)); // the pump announced itself
 
         // Stop parks the playhead — then the Seek is sample-exact and stable.
         engine.stop();

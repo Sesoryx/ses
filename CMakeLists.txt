@@ -20,8 +20,15 @@ endif()
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Widgets Svg Network Test)
 
 option(SES_BUILD_TESTS "Build ses tests" ON)
+option(SES_ENABLE_TSAN "Build with ThreadSanitizer (RT gate, separate build dir)" OFF)
 
 add_compile_options(-Wall -Wextra)
+
+if(SES_ENABLE_TSAN)
+  message(STATUS "ThreadSanitizer enabled — use a separate build dir, e.g. build-tsan")
+  add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -g)
+  add_link_options(-fsanitize=thread)
+endif()
 
 # ---- core: pure data + logic. Qt6::Core + the QtWidgets undo framework
 # (QUndoStack/QUndoCommand live in Widgets upstream; core contains no GUI code).
@@ -121,4 +128,22 @@ if(SES_BUILD_TESTS)
   target_link_libraries(tst_ui PRIVATE ses_ui Qt6::Test)
   add_test(NAME ui COMMAND tst_ui)
   set_tests_properties(ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+  # RT allocation guard (DESIGN §13): a malloc interposer is preloaded into
+  # this test only; the engine arms it inside the audio callback. Not built
+  # under TSan (the two instrumentation runtimes do not compose).
+  if(NOT SES_ENABLE_TSAN)
+    add_library(ses_rt_alloc_interposer SHARED tests/rt_alloc_interposer.cpp)
+    target_link_libraries(ses_rt_alloc_interposer PRIVATE ${CMAKE_DL_LIBS})
+    set_target_properties(ses_rt_alloc_interposer PROPERTIES
+      PREFIX "" OUTPUT_NAME "ses_rt_alloc_interposer")
+
+    add_executable(tst_rtalloc tests/tst_rtalloc.cpp)
+    target_link_libraries(tst_rtalloc PRIVATE ses_engine ${CMAKE_DL_LIBS})
+    add_dependencies(tst_rtalloc ses_rt_alloc_interposer)
+    add_test(NAME rt_alloc COMMAND tst_rtalloc)
+    set_tests_properties(rt_alloc PROPERTIES
+      ENVIRONMENT "LD_PRELOAD=$<TARGET_FILE:ses_rt_alloc_interposer>;SES_RT_ALLOC_REQUIRED=1"
+      SKIP_RETURN_CODE 77)
+  endif()
 endif()
