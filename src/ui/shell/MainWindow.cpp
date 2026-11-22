@@ -7,6 +7,7 @@
 #include "ui/panels/AiPanel.h"
 #include "ui/panels/HistoryPanel.h"
 #include "ui/panels/ModelManagerPanel.h"
+#include "ui/shell/DeviceRecovery.h"
 #include "ui/shell/Transport.h"
 #include "ui/theme/Icons.h"
 #include "ui/theme/ThemeManager.h"
@@ -38,6 +39,7 @@
 #include <QScrollBar>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QStyle>
 #include <QTabWidget>
 #include <QTextEdit>
 #include <QToolButton>
@@ -87,6 +89,8 @@ MainWindow::MainWindow(QWidget* parent)
     // rate. If no device opens, Transport honestly stays in preview mode.
     engine_.open(model_.project().sampleRate);
     transport_ = new Transport(&model_, &engine_, this);
+    recovery_ = new DeviceRecovery([this] { return reopenAudioDevice(); }, this);
+    recovery_->setPlaybackActive([this] { return transport_->playing(); });
     toast_ = new Toast(this);
 
     auto* central = new QWidget(this);
@@ -326,6 +330,13 @@ void MainWindow::buildStatusBar()
     offline->setProperty("status", QStringLiteral("ok"));
     offline->setToolTip(QStringLiteral("No telemetry, no cloud. The only network path is an explicit model download (P5)."));
     statusBar()->addWidget(offline);
+    audioStatusLabel_ = new QLabel(this);
+    audioStatusLabel_->setObjectName(QStringLiteral("Badge"));
+    audioStatusLabel_->setToolTip(QStringLiteral("Output device state. Disconnected devices are reopened with bounded backoff; transport resumes after recovery."));
+    statusBar()->addPermanentWidget(audioStatusLabel_);
+    setAudioStatus(transport_->previewMode() ? QStringLiteral("Audio · preview only")
+                                             : QStringLiteral("Audio · connected"),
+                   transport_->previewMode() ? QStringLiteral("warn") : QStringLiteral("ok"));
     auto* sr = new QLabel(QStringLiteral("%1 kHz").arg(model_.project().sampleRate / 1000.0), this);
     sr->setToolTip(QStringLiteral("Project sample rate (fixed 48 kHz in v1)"));
     statusBar()->addPermanentWidget(sr);
@@ -521,8 +532,47 @@ void MainWindow::wireModel()
     mixer_->setMeteringEnabled(!transport_->previewMode());
     connect(transport_, &Transport::telemetryUpdated, this,
             [this](const engine::Telemetry& t) { mixer_->setMasterPeak(t.masterPeak); });
-    // Transport::deviceEvent is the P1 task 7 hook (device-loss recovery +
-    // status bar); its ring drain already runs on the same 30 Hz timer.
+    // P1 task 7: close/reopen on the GUI thread with bounded backoff. The
+    // transport freezes (not silent preview) while the output is unavailable.
+    connect(transport_, &Transport::deviceEvent, recovery_, &DeviceRecovery::handleEvent);
+    connect(recovery_, &DeviceRecovery::interrupted, this, [this] {
+        transport_->preserveEngineState();
+        mixer_->setMeteringEnabled(false);
+        engineBadge_->setText(QStringLiteral("Audio · reconnecting"));
+        engineBadge_->setProperty("status", QStringLiteral("warn"));
+        setAudioStatus(QStringLiteral("Audio · reconnecting"), QStringLiteral("warn"));
+        toast_->show(QStringLiteral("Audio device disconnected — reconnecting…"), true);
+    });
+    connect(recovery_, &DeviceRecovery::attemptStarted, this,
+            [this](int attempt, int maximum) {
+                setAudioStatus(QStringLiteral("Audio · reconnecting %1/%2").arg(attempt).arg(maximum),
+                               QStringLiteral("warn"));
+            });
+    connect(recovery_, &DeviceRecovery::retryScheduled, this,
+            [this](int nextAttempt, int maximum, int delayMs) {
+                const double seconds = delayMs / 1000.0;
+                setAudioStatus(QStringLiteral("Audio · retry %1/%2 in %3 s")
+                                   .arg(nextAttempt).arg(maximum)
+                                   .arg(seconds, 0, 'f', delayMs % 1000 == 0 ? 0 : 1),
+                               QStringLiteral("warn"));
+            });
+    connect(recovery_, &DeviceRecovery::recovered, this, [this] {
+        engineBadge_->setText(QStringLiteral("CPU · engine"));
+        engineBadge_->setProperty("status", QStringLiteral("ok"));
+        setAudioStatus(QStringLiteral("Audio · connected"), QStringLiteral("ok"));
+        mixer_->setMeteringEnabled(true);
+        toast_->show(transport_->playing()
+                         ? QStringLiteral("Audio device reconnected — playback resumed")
+                         : QStringLiteral("Audio device reconnected"));
+    });
+    connect(recovery_, &DeviceRecovery::failed, this, [this] {
+        transport_->usePreviewMode();
+        mixer_->setMeteringEnabled(false);
+        engineBadge_->setText(QStringLiteral("Preview · no audio"));
+        engineBadge_->setProperty("status", QStringLiteral("danger"));
+        setAudioStatus(QStringLiteral("Audio · unavailable"), QStringLiteral("danger"));
+        toast_->show(QStringLiteral("Audio device unavailable — transport is in preview mode (no audio)"), true);
+    });
 
     // P1 task 5: the decode pool fills the MediaCache off the GUI thread;
     // decoded arenas are pinned while the project is open (DESIGN §4.3) and
@@ -639,6 +689,37 @@ void MainWindow::positionEmptyState()
 void MainWindow::updateThemeIcon()
 {
     themeBtn_->setIcon(sesIcon(ThemeManager::instance()->isDark() ? QStringLiteral("moon") : QStringLiteral("sun")));
+}
+
+bool MainWindow::reopenAudioDevice()
+{
+    // AudioDevice's destructor stops the old callback before a new device is
+    // opened. Transport commands restore all persistent playback state.
+    engine_.close();
+    if (!engine_.open(model_.project().sampleRate))
+        return false;
+
+    engine_.setLoop(transport_->loop(), transport_->loopStart(), transport_->loopEnd());
+    engine_.seek(transport_->playhead());
+    engine_.setAbFader(model_.project().ab.fader);
+    if (transport_->playing()) {
+        if (!engine_.start()) {
+            engine_.close();
+            return false;
+        }
+        engine_.play();
+    }
+    return true;
+}
+
+void MainWindow::setAudioStatus(const QString& text, const QString& status)
+{
+    audioStatusLabel_->setText(text);
+    audioStatusLabel_->setProperty("status", status);
+    for (QLabel* label : { audioStatusLabel_, engineBadge_ }) {
+        label->style()->unpolish(label);
+        label->style()->polish(label);
+    }
 }
 
 QString MainWindow::selectedTrackId() const
@@ -830,6 +911,8 @@ void MainWindow::dropEvent(QDropEvent* ev)
 
 void MainWindow::closeEvent(QCloseEvent* ev)
 {
+    recovery_->cancel();
+    engine_.close();
     settings_.save();
     ev->accept();
 }

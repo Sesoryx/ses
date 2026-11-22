@@ -228,6 +228,19 @@ private slots:
         QVERIFY(!dev.start()); // closed device refuses to start
     }
 
+    void audioDeviceCloseDoesNotReportDeviceLoss()
+    {
+        // close() is API-initiated teardown. Recovery closes the old device
+        // before reopening; a Stopped event here would restart the retry loop.
+        AudioDevice dev;
+        QVERIFY(dev.openOnBackend(ma_backend_null, 48000, 256));
+        QVERIFY(dev.start());
+        DeviceEvent e{};
+        while (dev.nextDeviceEvent(e)) { } // drain Started
+        dev.close();
+        QVERIFY(!dev.nextDeviceEvent(e));
+    }
+
     void audioDeviceTransportCommandsOnNullBackend()
     {
         AudioDevice dev;

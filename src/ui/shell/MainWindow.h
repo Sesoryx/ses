@@ -21,6 +21,7 @@ class QActionGroup;
 namespace ses::ui {
 
 class Transport;
+class DeviceRecovery;
 class TimelineWidget;
 class TrackHeaders;
 class AbFader;
@@ -70,6 +71,8 @@ private:
     void refreshTitle();
     void positionEmptyState();
     void updateThemeIcon();
+    bool reopenAudioDevice();
+    void setAudioStatus(const QString& text, const QString& status = {});
     QString selectedTrackId() const;
     void routeSelectedTrack(const QString& routing);
     void toggleSelectedTrackField(core::TrackField f);
@@ -82,6 +85,7 @@ private:
     core::MediaCache mediaCache_; // decoded arenas (GUI-side, DESIGN §4.3)
     engine::DecodePool decodePool_;
     Transport* transport_ = nullptr;
+    DeviceRecovery* recovery_ = nullptr;
 
     TimelineWidget* timeline_ = nullptr;
     TrackHeaders* headers_ = nullptr;
@@ -104,6 +108,7 @@ private:
     QLabel* selectionLabel_ = nullptr;
     QLabel* cursorLabel_ = nullptr;
     QLabel* engineBadge_ = nullptr;
+    QLabel* audioStatusLabel_ = nullptr;
 
     QAction* undoAct_ = nullptr;
     QAction* redoAct_ = nullptr;

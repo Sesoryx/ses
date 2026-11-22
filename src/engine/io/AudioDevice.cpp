@@ -78,8 +78,10 @@ bool AudioDevice::init(const ma_backend* backends, ma_uint32 backendCount,
 void AudioDevice::close()
 {
     if (initialized_) {
+        closing_.store(true, std::memory_order_release);
         ma_device_uninit(&device_);
         initialized_ = false;
+        closing_.store(false, std::memory_order_release);
     }
     src_.close();
     srcIn_.clear();
@@ -193,6 +195,8 @@ void AudioDevice::renderThroughSrc(float* dst, std::size_t frames)
 void AudioDevice::notificationCallback(const ma_device_notification* n)
 {
     auto* self = static_cast<AudioDevice*>(n->pDevice->pUserData);
+    if (self->closing_.load(std::memory_order_acquire))
+        return; // teardown noise, not a loss the GUI should recover from
     DeviceEvent e{};
     switch (n->type) {
     case ma_device_notification_type_started:            e.kind = DeviceEvent::Started; break;

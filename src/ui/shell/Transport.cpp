@@ -5,7 +5,7 @@
 namespace ses::ui {
 
 Transport::Transport(core::ProjectModel* model, engine::Engine* engine, QObject* parent)
-    : QObject(parent), model_(model), engine_(engine)
+    : QObject(parent), model_(model), engine_(engine), previewMode_(!engine->available())
 {
     qRegisterMetaType<engine::Telemetry>();
     qRegisterMetaType<engine::DeviceEvent>();
@@ -38,6 +38,7 @@ void Transport::play()
         if (!previewMode())
             engine_->seek(playhead_); // keep the RT playhead in sync with the UI
     }
+    stopPending_ = false;
     setPlaying(true);
     timer_.start();
 }
@@ -46,6 +47,10 @@ void Transport::stop()
 {
     if (!previewMode()) {
         engine_->stop();
+        // Stop is the user's intent; it also makes the Stopped notification
+        // distinguishable from a real device loss (DeviceRecovery probe).
+        stopPending_ = true;
+        setPlaying(false);
         // Keep the drain alive: the pump still emits silence telemetry (meters
         // decay) and device events can arrive any time (P1 task 7).
         return;
@@ -92,6 +97,28 @@ void Transport::setLoop(bool on)
     emit loopChanged(on);
 }
 
+void Transport::preserveEngineState()
+{
+    if (previewMode_ || !engine_->available())
+        return;
+    const auto st = engine_->state();
+    if (st.playhead == playhead_)
+        return;
+    playhead_ = st.playhead;
+    clock_.restart();
+    emit playheadChanged(playhead_);
+}
+
+void Transport::usePreviewMode()
+{
+    if (previewMode_)
+        return;
+    previewMode_ = true;
+    clock_.restart(); // do not count the device-outage interval as preview time
+    if (!playing_)
+        timer_.stop();
+}
+
 void Transport::drainEngine()
 {
     // Aggregate one 30 Hz window per signal: latest playhead/counters, max peak.
@@ -118,13 +145,19 @@ void Transport::tick()
 {
     if (!previewMode()) {
         drainEngine(); // P1 task 4: rings → meters (30 Hz)
+        // A device loss is not preview playback. Freeze both state and head
+        // while DeviceRecovery retries; resume from the preserved state.
+        if (!engine_->available())
+            return;
         // Real engine: pull authoritative state (playhead/playing atomics).
         const auto st = engine_->state();
         if (st.playhead != playhead_) {
             playhead_ = st.playhead;
             emit playheadChanged(playhead_);
         }
-        if (st.playing != playing_)
+        if (stopPending_ && !st.playing)
+            stopPending_ = false; // RT acknowledged the requested stop
+        if (st.playing != playing_ && !stopPending_)
             setPlaying(st.playing);
         return;
     }

@@ -5,6 +5,7 @@
 #include "core/persistence/Settings.h"
 #include "ui/mixer/AbFader.h"
 #include "ui/mixer/MixerPanel.h"
+#include "ui/shell/DeviceRecovery.h"
 #include "ui/shell/MainWindow.h"
 #include "ui/shell/Smoke.h"
 #include "ui/shell/Transport.h"
@@ -24,6 +25,35 @@
 #include <QtTest>
 
 using namespace ses::ui;
+
+namespace {
+
+class FakeEngine final : public ses::engine::Engine {
+public:
+    bool available() const override { return online; }
+    void play() override { st.playing = true; }
+    void stop() override { st.playing = false; }
+    void seek(int64_t sample) override { st.playhead = sample; }
+    void setLoop(bool on, int64_t start, int64_t end) override
+    {
+        st.loop = on;
+        st.loopStart = start;
+        st.loopEnd = end;
+    }
+    void setAbFader(double x) override { abFader = x; }
+    ses::engine::TransportState state() const override
+    {
+        return online ? st : ses::engine::TransportState{};
+    }
+    bool nextTelemetry(ses::engine::Telemetry&) override { return false; }
+    bool nextDeviceEvent(ses::engine::DeviceEvent&) override { return false; }
+
+    bool online = true;
+    double abFader = 0.5;
+    ses::engine::TransportState st;
+};
+
+} // namespace
 
 class TestUi : public QObject {
     Q_OBJECT
@@ -181,6 +211,127 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(updates >= 3, 2000); // several 30 Hz ticks
         QVERIFY(transport.playing());
         transport.stop();
+    }
+
+    void deviceRecoveryCoalescesEventsAndRecovers()
+    {
+        int opens = 0;
+        DeviceRecovery recovery([&opens] { return ++opens == 3; },
+                                { 10, 10, 10, 10 });
+        QSignalSpy interruptedSpy(&recovery, &DeviceRecovery::interrupted);
+        QSignalSpy attemptSpy(&recovery, &DeviceRecovery::attemptStarted);
+        QSignalSpy retrySpy(&recovery, &DeviceRecovery::retryScheduled);
+        QSignalSpy recoveredSpy(&recovery, &DeviceRecovery::recovered);
+        QSignalSpy failedSpy(&recovery, &DeviceRecovery::failed);
+
+        recovery.handleEvent({ ses::engine::DeviceEvent::Rerouted });
+        QCOMPARE(opens, 1); // the first reopen is immediate
+        QVERIFY(recovery.active());
+        QCOMPARE(recovery.attempt(), 1);
+        recovery.handleEvent({ ses::engine::DeviceEvent::Stopped });
+        recovery.handleEvent({ ses::engine::DeviceEvent::InterruptionBegan });
+        QCOMPARE(opens, 1); // repeated notifications do not reset the backoff
+        QCOMPARE(interruptedSpy.count(), 1);
+
+        QTRY_COMPARE_WITH_TIMEOUT(opens, 3, 2000);
+        QVERIFY(!recovery.active());
+        QCOMPARE(attemptSpy.count(), 3);
+        QCOMPARE(retrySpy.count(), 2);
+        QCOMPARE(retrySpy.at(0).at(0).toInt(), 2);
+        QCOMPARE(retrySpy.at(0).at(1).toInt(), 5);
+        QCOMPARE(retrySpy.at(0).at(2).toInt(), 10);
+        QCOMPARE(retrySpy.at(1).at(0).toInt(), 3);
+        QCOMPARE(recoveredSpy.count(), 1);
+        QCOMPARE(failedSpy.count(), 0);
+
+        recovery.handleEvent({ ses::engine::DeviceEvent::Started });
+        recovery.handleEvent({ ses::engine::DeviceEvent::InterruptionEnded });
+        QCOMPARE(opens, 3); // non-loss events never trigger reopen
+    }
+
+    void deviceRecoveryIgnoresRequestedStop()
+    {
+        // miniaudio reports a user-requested Stop with the same notification as
+        // a loss; only real losses while playback is expected trigger retries.
+        int opens = 0;
+        bool playing = false;
+        DeviceRecovery recovery([&opens] { ++opens; return true; }, { 1, 1, 1, 1 });
+        recovery.setPlaybackActive([&playing] { return playing; });
+        QSignalSpy interruptedSpy(&recovery, &DeviceRecovery::interrupted);
+
+        recovery.handleEvent({ ses::engine::DeviceEvent::Stopped });
+        QCOMPARE(opens, 0);
+        QCOMPARE(interruptedSpy.count(), 0);
+        QVERIFY(!recovery.active());
+
+        // A reroute is a real device change even while parked.
+        recovery.handleEvent({ ses::engine::DeviceEvent::Rerouted });
+        QCOMPARE(opens, 1);
+        QCOMPARE(interruptedSpy.count(), 1);
+        QVERIFY(!recovery.active());
+
+        // While playing, Stopped is a genuine loss.
+        playing = true;
+        recovery.handleEvent({ ses::engine::DeviceEvent::Stopped });
+        QCOMPARE(opens, 2);
+        QCOMPARE(interruptedSpy.count(), 2);
+        QVERIFY(!recovery.active());
+    }
+
+    void deviceRecoveryStopsAfterFiveFailures()
+    {
+        int opens = 0;
+        DeviceRecovery recovery([&opens] { ++opens; return false; },
+                                { 1, 1, 1, 1 });
+        QSignalSpy attemptSpy(&recovery, &DeviceRecovery::attemptStarted);
+        QSignalSpy failedSpy(&recovery, &DeviceRecovery::failed);
+        recovery.handleEvent({ ses::engine::DeviceEvent::Stopped });
+        QTRY_COMPARE_WITH_TIMEOUT(failedSpy.count(), 1, 2000);
+        QCOMPARE(opens, 5);
+        QCOMPARE(attemptSpy.count(), 5);
+        QCOMPARE(attemptSpy.last().at(0).toInt(), 5);
+        QCOMPARE(attemptSpy.last().at(1).toInt(), 5);
+        QVERIFY(!recovery.active());
+        QTest::qWait(15);
+        QCOMPARE(opens, 5); // no unbounded background retry loop
+    }
+
+    void transportFreezesDuringDeviceLoss()
+    {
+        ses::core::ProjectModel model;
+        ses::core::Clip clip;
+        clip.length = model.project().sampleRate * 4;
+        ses::core::Track track;
+        track.clips.append(clip);
+        model.project().tracks.append(track);
+
+        FakeEngine engine;
+        engine.st.playhead = 48000;
+        Transport transport(&model, &engine);
+        transport.play();
+        QTRY_COMPARE_WITH_TIMEOUT(transport.playhead(), int64_t(48000), 1000);
+        QVERIFY(!transport.previewMode());
+        QVERIFY(transport.playing());
+
+        engine.st.playhead = 52000;
+        transport.preserveEngineState(); // last authoritative head before close
+        QCOMPARE(transport.playhead(), int64_t(52000));
+        engine.online = false;
+        QTest::qWait(100);
+        QCOMPARE(transport.playhead(), int64_t(52000)); // no silent preview clock
+        QVERIFY(!transport.previewMode());
+        QVERIFY(transport.playing());
+
+        transport.play(); // idempotent while the user still expects playback
+        transport.stop(); // user cancellation is honored even with no device
+        QVERIFY(!transport.playing());
+        transport.play();
+        transport.usePreviewMode(); // only permanent failure enters preview
+        QVERIFY(transport.previewMode());
+        QTest::qWait(100);
+        QVERIFY(transport.playhead() > 52000);
+        transport.stop();
+        QVERIFY(!transport.playing());
     }
 
     void appIconIsEmbeddedAndRenders()

@@ -84,6 +84,7 @@ add_library(ses_ui STATIC
   src/ui/theme/ThemeManager.cpp
   src/ui/theme/Icons.cpp
   src/ui/shell/MainWindow.cpp
+  src/ui/shell/DeviceRecovery.cpp
   src/ui/shell/Transport.cpp
   src/ui/shell/Smoke.cpp
   src/ui/timeline/TimelineWidget.cpp

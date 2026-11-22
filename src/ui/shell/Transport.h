@@ -19,7 +19,9 @@ class Transport : public QObject {
 public:
     Transport(core::ProjectModel* model, engine::Engine* engine, QObject* parent = nullptr);
 
-    bool previewMode() const { return !engine_->available(); }
+    // Preview is an explicit no-device mode, not a temporary device loss.
+    // During recovery the transport freezes and later resumes (ROADMAP §2.6).
+    bool previewMode() const { return previewMode_; }
     bool playing() const { return playing_; }
     int64_t playhead() const { return playhead_; }
     bool loop() const { return loop_; }
@@ -34,6 +36,8 @@ public slots:
     void toStart();
     void nudge(int64_t deltaSamples);
     void setLoop(bool on);
+    void preserveEngineState(); // snapshot the authoritative head before close
+    void usePreviewMode();      // permanent recovery failure: honestly no audio
 
 signals:
     void playheadChanged(int64_t sample);
@@ -53,6 +57,8 @@ private:
     engine::Engine* engine_;
     QTimer timer_;
     QElapsedTimer clock_;
+    bool previewMode_ = false;
+    bool stopPending_ = false; // user Stop sent, RT has not acknowledged yet
     bool playing_ = false;
     bool loop_ = false;
     int64_t playhead_ = 0;

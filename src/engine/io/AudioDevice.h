@@ -72,6 +72,9 @@ private:
     SpscRing<RtCommand, 64> commands_;
     std::atomic<int64_t> playhead_{0};
     std::atomic<bool> playing_{false};
+    // close() is an API-initiated teardown, not a device loss: notifications
+    // from the dying device must not reach the recovery path (ROADMAP §2.6).
+    std::atomic<bool> closing_{false};
     int64_t loopStart_ = 0, loopEnd_ = 0;
     bool loop_ = false;
     float abFader_ = 0.5f; // wired to the bus crossfade in P4
