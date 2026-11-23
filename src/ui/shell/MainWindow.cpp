@@ -2,6 +2,7 @@
 
 #include "core/commands/Commands.h"
 #include "core/media/MediaProbe.h"
+#include "core/render/RenderPlanBuilder.h"
 #include "ui/mixer/AbFader.h"
 #include "ui/mixer/MixerPanel.h"
 #include "ui/panels/AiPanel.h"
@@ -42,6 +43,7 @@
 #include <QStyle>
 #include <QTabWidget>
 #include <QTextEdit>
+#include <QTimer>
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -114,6 +116,14 @@ MainWindow::MainWindow(QWidget* parent)
     refreshTransport();
     positionEmptyState();
     updateThemeIcon();
+
+    // P2: retired render plans are freed on the GUI thread after the grace
+    // window (DESIGN §4.3). 30 Hz is ample: the slot keeps at most a few
+    // blocks of plans alive, and the app never blocks on this.
+    planReclaimTimer_ = new QTimer(this);
+    planReclaimTimer_->setInterval(33);
+    connect(planReclaimTimer_, &QTimer::timeout, this, [this] { engine_.reclaimPlans(); });
+    planReclaimTimer_->start();
 }
 
 // ---- transport bar ---------------------------------------------------------------
@@ -510,6 +520,7 @@ void MainWindow::wireModel()
         refreshTitle();
         refreshTransport();
         positionEmptyState();
+        publishRenderPlan();
         // Sync A/B fader + mode from the model (undo, bus commands).
         abFader_->blockSignals(true);
         abFader_->setValue(model_.project().ab.fader);
@@ -580,6 +591,8 @@ void MainWindow::wireModel()
     connect(&decodePool_, &engine::DecodePool::ready, this, [this](const QString& path) {
         mediaCache_.pin(path);
         timeline_->viewport()->update();
+        // A clip whose arena just landed becomes audible in the plan.
+        publishRenderPlan();
     });
     connect(&decodePool_, &engine::DecodePool::failed, this,
             [this](const QString& path, const QString& error) {
@@ -802,6 +815,15 @@ void MainWindow::splitAtPlayhead()
     if (valid == 1)
         macro->setText(QStringLiteral("Split clip"));
     model_.push(macro);
+}
+
+void MainWindow::publishRenderPlan()
+{
+    // GUI thread only. The builder reads the project + MediaCache; the engine
+    // owns the plan afterwards (the slot frees it after the grace window).
+    core::RenderPlanBuilder builder(&mediaCache_);
+    auto* plan = new core::RenderPlan(builder.build(model_.project()));
+    engine_.publishPlan(plan);
 }
 
 void MainWindow::importFiles(const QStringList& paths)

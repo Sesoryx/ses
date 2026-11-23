@@ -37,6 +37,7 @@ add_library(ses_core STATIC
   src/core/model/ProjectModel.cpp
   src/core/commands/Commands.cpp
   src/core/render/FadeCurve.cpp
+  src/core/render/RenderPlanBuilder.cpp
   src/core/persistence/Settings.cpp
   src/core/media/MediaProbe.cpp
   src/core/media/AudioBuffer.cpp
@@ -68,6 +69,7 @@ pkg_check_modules(SOXR REQUIRED IMPORTED_TARGET soxr)
 add_library(ses_engine STATIC
   src/engine/Engine.cpp
   src/engine/dsp/Resampler.cpp
+  src/engine/rt/PlanMixer.cpp
   src/engine/io/miniaudio_impl.cpp
   src/engine/io/AudioDevice.cpp
   src/engine/io/Decode.cpp

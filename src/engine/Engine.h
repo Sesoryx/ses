@@ -8,6 +8,8 @@
 
 #include "engine/io/DeviceTypes.h"
 
+#include "core/render/RenderPlan.h"
+
 #include <cstdint>
 #include <memory>
 
@@ -41,6 +43,13 @@ public:
     // False when nothing is queued (or no device is attached).
     virtual bool nextTelemetry(Telemetry& out) = 0;
     virtual bool nextDeviceEvent(DeviceEvent& out) = 0;
+
+    // P2: publish a freshly built render plan and reclaim retired ones.
+    // The engine owns the plan after publish(); the slot frees it after the
+    // grace window. Returns false when no device is attached (the plan is
+    // still owned by the slot and will be freed by the destructor).
+    virtual void publishPlan(core::RenderPlan* plan) = 0;
+    virtual void reclaimPlans() = 0;
 };
 
 // Inert placeholder: reports unavailable, remembers nothing. Never pretends
@@ -56,6 +65,9 @@ public:
     TransportState state() const override { return {}; }
     bool nextTelemetry(Telemetry&) override { return false; }
     bool nextDeviceEvent(DeviceEvent&) override { return false; }
+    // NullEngine has no slot: the plan would leak, so take ownership and free.
+    void publishPlan(core::RenderPlan* plan) override { delete plan; }
+    void reclaimPlans() override {}
 };
 
 // Real device-backed engine (ROADMAP P1 task 3). Owns the AudioDevice and
@@ -95,6 +107,10 @@ public:
     // GUI-thread drains for events and meters (30 Hz QTimer in ui::Transport).
     bool nextTelemetry(Telemetry& out) override;
     bool nextDeviceEvent(DeviceEvent& out) override;
+
+    // P2: plan publish + grace reclaim (GUI thread).
+    void publishPlan(core::RenderPlan* plan) override;
+    void reclaimPlans() override;
 
     int actualSampleRate() const; // 0 when no device is open
 

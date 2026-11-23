@@ -7,6 +7,8 @@
 #include "core/model/ProjectModel.h"
 #include "core/persistence/Settings.h"
 #include "core/render/FadeCurve.h"
+#include "core/render/RenderPlan.h"
+#include "core/render/RenderPlanBuilder.h"
 
 #include <QFile>
 #include <QJsonDocument>
@@ -751,6 +753,158 @@ private slots:
         cache.clear();
         QCOMPARE(cache.size(), 0);
         QVERIFY(held);
+    }
+
+    // ---- render plan (P2) ---------------------------------------------------------
+
+    // A 1-frame-per-value arena: pcm[i*2] = pcm[i*2+1] = values[i].
+    static std::shared_ptr<AudioBuffer> makeArena(const QVector<float>& values, int rate = 48000)
+    {
+        auto buffer = std::make_shared<AudioBuffer>();
+        buffer->pcm.resize(values.size() * 2);
+        for (int i = 0; i < values.size(); ++i) {
+            buffer->pcm[std::size_t(i) * 2] = values[i];
+            buffer->pcm[std::size_t(i) * 2 + 1] = values[i];
+        }
+        buffer->sampleRate = rate;
+        buffer->channels = 2;
+        buffer->frames = values.size();
+        buffer->peaks = PeakPyramid{};
+        return buffer;
+    }
+
+    // Project with one media item + one track + one clip over `frames` frames.
+    static Project planProject(int64_t frames, const QString& path = QStringLiteral("m.wav"))
+    {
+        Project p;
+        MediaItem m;
+        m.id = QStringLiteral("m1");
+        m.path = path;
+        m.sampleRate = 48000;
+        m.channels = 2;
+        m.frames = frames;
+        m.format = QStringLiteral("wav");
+        p.mediaPool.append(m);
+        Track t;
+        t.id = QStringLiteral("t1");
+        t.name = QStringLiteral("VOX");
+        Clip c;
+        c.id = QStringLiteral("c1");
+        c.mediaId = m.id;
+        c.timelineStart = 0;
+        c.sourceOffset = 0;
+        c.length = frames;
+        t.clips.append(c);
+        p.tracks.append(t);
+        return p;
+    }
+
+    void renderPlanBuilderSchedulesClipsAndKeepsArenas()
+    {
+        const QVector<float> values{ 0.25f, 0.5f, 0.75f, 1.0f };
+        MediaCache cache;
+        cache.insert(QStringLiteral("m.wav"), makeArena(values));
+
+        const Project p = planProject(4);
+        RenderPlanBuilder builder(&cache);
+        const RenderPlan plan = builder.build(p);
+
+        QCOMPARE(plan.sampleRate, 48000);
+        QCOMPARE(plan.clips.size(), 1);
+        const PlanClip& pc = plan.clips.first();
+        QCOMPARE(pc.samples, cache.find(QStringLiteral("m.wav"))->pcm.data());
+        QCOMPARE(pc.timelineStart, int64_t(0));
+        QCOMPARE(pc.length, int64_t(4));
+        QCOMPARE(pc.arenaFrames, int64_t(4));
+
+        // The plan holds the arena: the cache can't evict it while published.
+        QCOMPARE(plan.bufferRefs.size(), std::size_t(1));
+        QCOMPARE(plan.bufferRefs.front().use_count(), 2); // cache + plan
+        QCOMPARE(cache.evict(std::chrono::milliseconds(0)), 0);
+    }
+
+    void renderPlanBuilderClampsToMediaBounds()
+    {
+        // Clip asks for 10 frames from offset 2 of a 4-frame arena: the plan
+        // must clamp the window instead of reading past the arena.
+        const QVector<float> values{ 0.1f, 0.2f, 0.3f, 0.4f };
+        MediaCache cache;
+        cache.insert(QStringLiteral("m.wav"), makeArena(values));
+        Project p = planProject(10);
+        p.tracks.first().clips.first().sourceOffset = 2;
+        p.tracks.first().clips.first().length = 10;
+
+        const RenderPlan plan = RenderPlanBuilder(&cache).build(p);
+        QCOMPARE(plan.clips.size(), 1);
+        QCOMPARE(plan.clips.first().sourceOffset, int64_t(2));
+        QCOMPARE(plan.clips.first().length, int64_t(2));
+        QCOMPARE(plan.clips.first().samples, cache.find(QStringLiteral("m.wav"))->pcm.data());
+    }
+
+    void renderPlanBuilderResolvesMuteSoloAndRate()
+    {
+        const QVector<float> values{ 0.5f, 0.5f };
+        MediaCache cache;
+        cache.insert(QStringLiteral("m.wav"), makeArena(values));
+
+        Project p = planProject(2);
+        p.tracks.first().clips.first().timelineStart = 0;
+        Track second;
+        second.id = QStringLiteral("t2");
+        second.mute = true;
+        Clip c2;
+        c2.id = QStringLiteral("c2");
+        c2.mediaId = QStringLiteral("m1");
+        c2.length = 2;
+        c2.timelineStart = 100;
+        second.clips.append(c2);
+        p.tracks.append(second);
+
+        // Muted track: only the first clip is audible.
+        const RenderPlan muted = RenderPlanBuilder(&cache).build(p);
+        QCOMPARE(muted.clips.size(), 1);
+        QCOMPARE(muted.clips.first().timelineStart, int64_t(0));
+
+        // Solo on the first track silences the (unmuted, but non-solo) second.
+        p.tracks.first().solo = true;
+        const RenderPlan soloed = RenderPlanBuilder(&cache).build(p);
+        QCOMPARE(soloed.anySolo, true);
+        QCOMPARE(soloed.clips.size(), 1);
+        QCOMPARE(soloed.clips.first().timelineStart, int64_t(0));
+
+        // Clip-level mute is silent too.
+        p.tracks.first().solo = false;
+        p.tracks.first().clips.first().muted = true;
+        p.tracks[1].mute = false;
+        const RenderPlan clipMuted = RenderPlanBuilder(&cache).build(p);
+        QCOMPARE(clipMuted.clips.size(), 1); // only the second track's clip
+        QCOMPARE(clipMuted.clips.first().timelineStart, int64_t(100));
+
+        // An arena at a foreign rate is not playable at the project rate.
+        MediaCache odd;
+        odd.insert(QStringLiteral("m.wav"), makeArena(values, 44100));
+        const RenderPlan wrongRate = RenderPlanBuilder(&odd).build(p);
+        QCOMPARE(wrongRate.clips.size(), 0);
+    }
+
+    void renderPlanBuilderSortsClipsAndDedupesArenas()
+    {
+        const QVector<float> values{ 0.5f, 0.5f };
+        MediaCache cache;
+        cache.insert(QStringLiteral("m.wav"), makeArena(values));
+
+        Project p = planProject(2);
+        p.tracks.first().clips.first().timelineStart = 500;
+        Clip second = p.tracks.first().clips.first();
+        second.id = QStringLiteral("c2");
+        second.timelineStart = 100;
+        p.tracks.first().clips.append(second);
+
+        const RenderPlan plan = RenderPlanBuilder(&cache).build(p);
+        QCOMPARE(plan.clips.size(), 2);
+        QVERIFY(plan.clips[0].timelineStart < plan.clips[1].timelineStart);
+        // Both clips share one arena: the plan must hold exactly one reference.
+        QCOMPARE(plan.bufferRefs.size(), std::size_t(1));
     }
 };
 

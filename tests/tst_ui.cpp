@@ -47,6 +47,8 @@ public:
     }
     bool nextTelemetry(ses::engine::Telemetry&) override { return false; }
     bool nextDeviceEvent(ses::engine::DeviceEvent&) override { return false; }
+    void publishPlan(ses::core::RenderPlan* plan) override { delete plan; }
+    void reclaimPlans() override {}
 
     bool online = true;
     double abFader = 0.5;

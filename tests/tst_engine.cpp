@@ -1,10 +1,15 @@
 #include "core/media/MediaProbe.h"
+#include "core/render/FadeCurve.h"
+#include "core/render/RenderPlan.h"
+#include "core/render/RenderPlanBuilder.h"
 #include "engine/Engine.h"
 #include "engine/dsp/Resampler.h"
 #include "engine/io/AudioDevice.h"
 #include "engine/io/Decode.h"
 #include "engine/BlockMixer.h"
 #include "engine/SpscRing.h"
+#include "engine/rt/PlanMixer.h"
+#include "engine/rt/RenderPlanSlot.h"
 
 #include <QFile>
 #include <QSignalSpy>
@@ -22,6 +27,9 @@
 #include <vector>
 
 using namespace ses::engine;
+using ses::core::Fade;
+using ses::core::PlanClip;
+using ses::core::RenderPlan;
 
 namespace {
 
@@ -727,6 +735,183 @@ private slots:
 
         pool.waitForDone();
         QVERIFY(!pool.busy());
+    }
+
+    // ---- render plan + slot (P2) --------------------------------------------------
+
+    // Stable backing store for the samples a plan points at. The plan holds a
+    // raw pointer, so the arena must outlive every render call in the test.
+    static std::vector<float> arena;
+    static void resetArena(const std::vector<float>& values)
+    {
+        arena = values;
+    }
+
+    // A plan over the current `arena` (one value per frame, both channels)
+    // starting at `start`, with optional gain/pan/mute/fade.
+    static RenderPlan singleClipPlan(int64_t start = 0, float gain = 1.0f,
+                                     float pan = 0.0f, bool muted = false,
+                                     Fade fadeIn = {}, Fade fadeOut = {})
+    {
+        RenderPlan plan;
+        plan.sampleRate = 48000;
+        PlanClip pc;
+        pc.samples = arena.data();
+        pc.arenaFrames = int64_t(arena.size() / 2);
+        pc.timelineStart = start;
+        pc.length = int64_t(arena.size() / 2);
+        pc.gain = gain;
+        pc.pan = pan;
+        pc.muted = muted;
+        pc.fadeIn = fadeIn;
+        pc.fadeOut = fadeOut;
+        plan.clips.append(std::move(pc));
+        return plan;
+    }
+
+    void planMixerRendersGainPanAndMute()
+    {
+        resetArena(makeTone(48000, 0.01)); // 0.5 amplitude
+        PlanMixer mixer;
+        float out[8 * 2];
+
+        // Full gain, center pan: the tone passes at 0.5.
+        mixer.render(singleClipPlan(0, 1.0f, 0.0f), 0, 8, out);
+        QCOMPARE(out[0], 0.5f);
+        QCOMPARE(out[1], 0.5f);
+
+        // Hard-left pan: right channel silent.
+        mixer.render(singleClipPlan(0, 1.0f, -1.0f), 0, 8, out);
+        QCOMPARE(out[0], 0.5f);
+        QCOMPARE(out[1], 0.0f);
+
+        // Gain 0.25.
+        mixer.render(singleClipPlan(0, 0.25f, 0.0f), 0, 8, out);
+        QCOMPARE(out[0], 0.125f);
+
+        // Muted clip: silence, and the buffer is replaced (not accumulated).
+        std::fill_n(out, 16, 7.0f);
+        mixer.render(singleClipPlan(0, 1.0f, 0.0f, true), 0, 8, out);
+        QCOMPARE(out[0], 0.0f);
+        QCOMPARE(out[15], 0.0f);
+    }
+
+    void planMixerSchedulesByTimeline()
+    {
+        const std::vector<float> tone = makeTone(48000, 0.02);
+        resetArena(tone);
+        PlanMixer mixer;
+        float out[8 * 2];
+
+        // Clip starts at frame 4: frames 0..3 silent, 4..7 loud.
+        mixer.render(singleClipPlan(4), 0, 8, out);
+        QCOMPARE(out[0], 0.0f);
+        QCOMPARE(out[8], 0.5f);
+
+        // Playhead inside the clip: the source offset advances with it.
+        mixer.render(singleClipPlan(0), 2, 2, out);
+        const float expected = tone[4]; // source frame 2
+        QVERIFY(std::abs(out[0] - expected) < 1e-6f);
+
+        // Past the clip: silence.
+        mixer.render(singleClipPlan(0), 48000, 4, out);
+        QCOMPARE(out[0], 0.0f);
+
+        // Overlapping clips on the same block sum.
+        RenderPlan two;
+        two.sampleRate = 48000;
+        PlanClip a;
+        a.samples = arena.data();
+        a.arenaFrames = arena.size() / 2;
+        a.length = arena.size() / 2;
+        PlanClip b = a;
+        b.gain = 0.5f;
+        two.clips.append(a);
+        two.clips.append(b);
+        mixer.render(two, 0, 8, out);
+        QCOMPARE(out[0], 0.75f); // 0.5 + 0.5*0.5
+    }
+
+    void planMixerFadesAreSampleExact()
+    {
+        // DC 1.0 so the fade curve is directly readable on the output.
+        resetArena(std::vector<float>(8 * 2, 1.0f));
+        PlanMixer mixer;
+        float out[8 * 2];
+
+        const Fade in{ 4, QStringLiteral("linear"), {} };
+        mixer.render(singleClipPlan(0, 1.0f, 0.0f, false, in, {}), 0, 4, out);
+        // linear fade-in: p = src/4 → 0, 0.25, 0.5, 0.75
+        const float expected[] = { 0.0f, 0.25f, 0.5f, 0.75f };
+        for (int i = 0; i < 4; ++i)
+            QVERIFY(std::abs(out[i * 2] - expected[i]) < 1e-6f);
+
+        // Equal-power fade-out over the last 4 frames.
+        const Fade outFade{ 4, QStringLiteral("equalPower"), {} };
+        std::fill_n(out, 16, 0.0f);
+        mixer.render(singleClipPlan(0, 1.0f, 0.0f, false, {}, outFade), 4, 4, out);
+        // p = 1 - fromEnd/4 → 0.25, 0.5, 0.75, 1.0 → cos(p·π/2)
+        const float expectedOut[] = { 0.9238795f, 0.7071068f, 0.3826834f, 0.0f };
+        for (int i = 0; i < 4; ++i)
+            QVERIFY(std::abs(out[i * 2] - expectedOut[i]) < 1e-5f);
+    }
+
+    void planSlotPublishesAndReclaimsAfterGrace()
+    {
+        ses::engine::RenderPlanSlot slot(2); // grace of 2 blocks
+
+        resetArena(makeTone(48000, 0.001));
+        auto* first = new RenderPlan(singleClipPlan());
+        auto* second = new RenderPlan(singleClipPlan());
+        slot.publish(first);
+        QCOMPARE(slot.current(), first);
+        slot.publish(second); // first is now retired
+        QCOMPARE(slot.current(), second);
+
+        // The consumer is mid-block on `second` — nothing may be freed yet.
+        slot.acquire();
+        slot.reclaim();
+        QCOMPARE(slot.current(), second);
+
+        // After the grace window the retired plan is gone; the live one stays.
+        slot.acquire();
+        slot.acquire();
+        slot.reclaim();
+        QCOMPARE(slot.current(), second);
+        // A second reclaim is idempotent (no double free).
+        slot.reclaim();
+        QCOMPARE(slot.current(), second);
+    }
+
+    void devicePlaysPublishedPlanThroughCallback()
+    {
+        // End-to-end P2: a real plan published into the device slot, played on
+        // the null backend, must produce the clip's samples in the callback.
+        resetArena(makeTone(48000, 0.2)); // 0.5 amplitude
+        AudioDevice dev;
+        QVERIFY(dev.openOnBackend(ma_backend_null, 48000, 256));
+        dev.planSlot().publish(new RenderPlan(singleClipPlan(0)));
+        QVERIFY(dev.start());
+        QVERIFY(dev.sendCommand({ RtCommand::Play }));
+
+        // The master peak must reach the clip's amplitude (0.5), proving the
+        // plan path — not the raw mixer fallback — produced the samples.
+        Telemetry t{};
+        t = waitFor(dev, t, [](const Telemetry& x) { return x.masterPeak > 0.45f; });
+        QVERIFY(t.masterPeak <= 0.55f);
+        QVERIFY(t.playhead >= 256);
+
+        // Muting the plan's clip silences the output: publish a muted plan.
+        dev.planSlot().publish(new RenderPlan(singleClipPlan(0, 1.0f, 0.0f, true)));
+        Telemetry s{};
+        s = waitFor(dev, t, [](const Telemetry& x) {
+            return x.playhead > 1000 && x.masterPeak < 0.01f;
+        });
+        QVERIFY(s.masterPeak < 0.01f);
+
+        dev.sendCommand({ RtCommand::Stop });
+        dev.stop();
+        dev.close();
     }
 };
 

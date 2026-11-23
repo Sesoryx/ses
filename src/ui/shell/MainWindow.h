@@ -46,6 +46,11 @@ public:
     AbFader* abFader() const { return abFader_; }
     core::Settings& settings() { return settings_; }
 
+    // P2: rebuild + publish the render plan from the current project state.
+    // Called on every committed model change (GUI thread) and on decode
+    // completion (an arena that was missing becomes audible).
+    void publishRenderPlan();
+
     void importFiles(const QStringList& paths);
     void splitAtPlayhead();
     void toggleTheme();
@@ -109,6 +114,7 @@ private:
     QLabel* cursorLabel_ = nullptr;
     QLabel* engineBadge_ = nullptr;
     QLabel* audioStatusLabel_ = nullptr;
+    QTimer* planReclaimTimer_ = nullptr;
 
     QAction* undoAct_ = nullptr;
     QAction* redoAct_ = nullptr;

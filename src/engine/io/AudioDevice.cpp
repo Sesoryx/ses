@@ -127,12 +127,15 @@ void AudioDevice::dataCallback(ma_device* dev, void* out, const void* /*in*/, ma
     const int64_t head = self->playhead_.load(std::memory_order_relaxed);
     float* dst = static_cast<float*>(out);
     if (self->playing_.load(std::memory_order_relaxed)) {
+        // P2: the published plan is the source of truth (renderProject reads
+        // the slot). With no plan published the raw mixer views still render,
+        // which keeps the P1 headless tests meaningful.
         if (self->src_.active()) {
-            // mixer.render (project rate) → soxr → device out (§3.3); the
+            // plan.render (project rate) → soxr → device out (§3.3); the
             // playhead/loop wrap happen inside, in project frames.
             self->renderThroughSrc(dst, frames);
         } else {
-            self->mixer_.render(head, frames, dst); // noexcept, allocation-free (existing BlockMixer)
+            self->renderProject(dst, frames, head);
             int64_t next = head + frames;
             if (self->loop_ && self->loopEnd_ > self->loopStart_ && next >= self->loopEnd_)
                 next = self->loopStart_; // loop wrap; keep cursor reset simple in P1
@@ -185,7 +188,7 @@ void AudioDevice::renderThroughSrc(float* dst, std::size_t frames)
             const std::size_t want = std::min(
                 kSrcInCapFrames,
                 std::size_t(double(frames - written) * ratio) + kSrcMarginFrames);
-            mixer_.render(renderPos + static_cast<int64_t>(consumed), want, srcIn_.data());
+            renderProject(srcIn_.data(), want, renderPos + static_cast<int64_t>(consumed));
             bufFrames = want;
         }
         std::size_t idone = 0;
@@ -214,8 +217,8 @@ void AudioDevice::renderThroughSrc(float* dst, std::size_t frames)
             const std::size_t extra = std::min(
                 kSrcInCapFrames - bufFrames,
                 std::max<std::size_t>(kSrcMarginFrames, frames * 2));
-            mixer_.render(renderPos + static_cast<int64_t>(consumed + bufFrames), extra,
-                          srcIn_.data() + bufFrames * 2);
+            renderProject(srcIn_.data() + bufFrames * 2, extra,
+                          renderPos + static_cast<int64_t>(consumed + bufFrames));
             bufFrames += extra;
         }
     }
@@ -245,6 +248,19 @@ void AudioDevice::renderThroughSrc(float* dst, std::size_t frames)
         std::fill_n(dst + written * 2, (frames - written) * 2, 0.0f);
         ++underruns_;
     }
+}
+
+// RT: render one block of the published plan. The plan pointer is loaded once
+// per block (acquire) — the GUI may publish a new plan immediately after, and
+// that only affects the next block. With no plan published the raw mixer
+// views render, so the P1 headless tests keep working unchanged.
+void AudioDevice::renderProject(float* dst, std::size_t frames, int64_t head)
+{
+    const core::RenderPlan* plan = slot_.acquire();
+    if (plan)
+        planMixer_.render(*plan, head, frames, dst);
+    else
+        mixer_.render(head, frames, dst);
 }
 
 void AudioDevice::notificationCallback(const ma_device_notification* n)

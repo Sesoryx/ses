@@ -113,6 +113,22 @@ bool DeviceEngine::nextDeviceEvent(DeviceEvent& out)
     return device_ && device_->nextDeviceEvent(out);
 }
 
+void DeviceEngine::publishPlan(core::RenderPlan* plan)
+{
+    if (!plan)
+        return;
+    if (device_)
+        device_->planSlot().publish(plan);
+    else
+        delete plan; // no device: no slot to own it
+}
+
+void DeviceEngine::reclaimPlans()
+{
+    if (device_)
+        device_->planSlot().reclaim();
+}
+
 int DeviceEngine::actualSampleRate() const
 {
     return device_ ? device_->actualSampleRate() : 0;

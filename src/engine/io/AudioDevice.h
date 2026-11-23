@@ -1,13 +1,16 @@
 #pragma once
-// ses::engine — real device transport (ROADMAP §2.3, P1 tasks 1–2).
+// ses::engine — real device transport (ROADMAP §2.3, P1 tasks 1–2; P2 plan).
 // Qt-free. The audio callback obeys the RT rules (DESIGN §2/§4): no
 // allocation, no locks, no Qt, no logging. GUI ↔ RT traffic crosses only the
-// SpscRing members below; mutable RT state lives here, never in shared plans.
+// SpscRing members below plus the RenderPlanSlot atomic pointer; mutable RT
+// state lives here, never in shared plans.
 
 #include "engine/BlockMixer.h"
 #include "engine/SpscRing.h"
 #include "engine/dsp/Resampler.h"
 #include "engine/io/DeviceTypes.h"
+#include "engine/rt/PlanMixer.h"
+#include "engine/rt/RenderPlanSlot.h"
 
 #include <miniaudio.h>
 
@@ -51,8 +54,18 @@ public:
     bool nextDeviceEvent(DeviceEvent& out) { return events_.pop(out); }
     bool sendCommand(const RtCommand& cmd) { return commands_.push(cmd); }
 
-    // Off-RT configuration (GUI thread, while the device is stopped or via the
-    // plan-publish protocol).
+    // ---- render plan (P2) -------------------------------------------------------
+    // Off-RT configuration: the GUI builds a plan and publishes it. The
+    // callback only acquires() the immutable pointer (one load per block).
+    RenderPlanSlot& planSlot() { return slot_; }
+    const RenderPlanSlot& planSlot() const { return slot_; }
+
+    // GUI thread: frees retired plans after the grace window (30 Hz timer).
+    void reclaimPlans() { slot_.reclaim(); }
+
+    // Off-RT mixer access kept for tests that drive a raw clip view without a
+    // project plan; the device callback prefers the published plan when one
+    // exists. The plan is the single source of truth during playback.
     BlockMixer& mixer() { return mixer_; }
 
 private:
@@ -62,11 +75,15 @@ private:
     static void dataCallback(ma_device* dev, void* out, const void* in, ma_uint32 frames);
     static void notificationCallback(const ma_device_notification* n);
     void applyCommands(); // RT: drain the command ring at block boundaries
-    void renderThroughSrc(float* dst, std::size_t frames); // RT: mixer → soxr → out
+    void renderThroughSrc(float* dst, std::size_t frames); // RT: plan → soxr → out
+    // RT: the published plan (or the raw mixer view when no plan is live).
+    void renderProject(float* dst, std::size_t frames, int64_t head);
 
     ma_device device_{};
     bool initialized_ = false;
-    BlockMixer mixer_;
+    BlockMixer mixer_;     // raw clip views (tests / pre-plan fallback)
+    PlanMixer planMixer_;  // P2: renders the published RenderPlan
+    RenderPlanSlot slot_;  // P2: atomic plan publish + grace reclaim
     SpscRing<Telemetry, 64> telemetry_;
     SpscRing<DeviceEvent, 16> events_;
     SpscRing<RtCommand, 64> commands_;
